@@ -1,0 +1,2 @@
+sys-apps/systemd audit bpf cryptsetup curl elfutils fido2 homed http pkcs11 tpm
+sys-apps/systemd-utils sysusers

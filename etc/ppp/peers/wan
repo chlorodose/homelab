@@ -1,0 +1,20 @@
+plugin pppoe.so
+
+linkname wan
+ifname wan
+
+persist
+lcp-echo-interval 15
+lcp-echo-failure 3
+
+deflate 15
+predictor1
+bsdcomp 15
+
+file /run/credentials/pppd-wan.service/network.pppoe.wan
+
+noproxyarp
+nodetach
+noktune
+nodefaultroute
+noauth

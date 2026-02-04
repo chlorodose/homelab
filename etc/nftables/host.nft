@@ -1,0 +1,31 @@
+table inet host-firewall {
+    counter FUCKISP { comment "FUCK ALL CHINA ISP" }
+    chain filter-http {
+        type filter hook prerouting priority raw; policy accept
+        comment "FUCK CHINA INTERNET"
+        iifname "wan" tcp dport {80, 443} counter name "FUCKISP" log level notice flags ip,ether prefix "ISP FUCK YOU FOR: " drop
+        iifname "wan" udp dport {80, 443} counter name "FUCKISP" log level notice flags ip,ether prefix "ISP FUCK YOU FOR: " drop
+    }
+
+    counter hijacked-dns {}
+    counter hijacked-ntp {}
+    counter blocked-dot {}
+    counter blocked-ntp {}
+    chain hijacking {
+        type nat hook prerouting priority dstnat; policy accept
+        udp dport 53 counter name "hijacked-dns" redirect to :53
+        tcp dport 53 counter name "hijacked-dns" redirect to :53
+
+        ip6 nexthdr udp udp dport 123 counter name "blocked-ntp" reject with icmpv6 type admin-prohibited
+        udp dport 123 counter name "hijacked-ntp" redirect to :123
+
+        udp dport 853 counter name "blocked-dot" reject with icmpx type admin-prohibited
+        tcp dport 853 counter name "blocked-dot" reject with icmpx type admin-prohibited
+    }
+
+
+    chain devices-blacklist {
+        type filter hook forward priority raw; policy accept;
+        ether saddr { 7e:78:13:98:62:e0, 50:B3:B4:3E:67:B0, 50:B3:B4:37:73:90, 50:B3:B4:37:61:C8 } oifname != { "lan", "wg" } reject with icmpx type admin-prohibited
+    }
+}

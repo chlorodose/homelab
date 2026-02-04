@@ -1,0 +1,3 @@
+sys-boot/grub -device-mapper
+dev-util/ostree grub dracut
+sys-kernel/installkernel grub dracut

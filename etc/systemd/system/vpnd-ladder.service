@@ -1,0 +1,45 @@
+[Unit]
+After=network-pre.target
+Before=network.target
+Wants=network.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+ExecStartPre=/usr/lib/systemd/systemd-networkd-wait-online -i wan -o routable --timeout=30
+Type=notify
+ExecStartPre=!tunctl -n -u anyconnect -g anyconnect -t ladder
+ExecStart=openconnect --protocol=anyconnect --interface=ladder --certificate=${CREDENTIALS_DIRECTORY}/network.anyconnect.ladder.certificate --sslkey=${CREDENTIALS_DIRECTORY}/network.anyconnect.ladder.sslkey --compression=all --force-dpd=60 --no-external-auth --non-inter --queue-len=16 --script=/usr/local/sbin/systemd-notify-ready --csd-wrapper=/usr/bin/true --config=${CREDENTIALS_DIRECTORY}/network.anyconnect.ladder --verbose
+TimeoutStartSec=90s
+
+[Service]
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+KeyringMode=private
+LockPersonality=true
+MemoryDenyWriteExecute=true
+NoNewPrivileges=true
+PrivateMounts=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelModules=true
+ProtectKernelTunables=false
+ProtectSystem=strict
+RemoveIPC=true
+Restart=always
+RestartSec=5
+RestrictAddressFamilies=AF_INET
+RestrictAddressFamilies=AF_INET6
+RestrictAddressFamilies=AF_NETLINK
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+User=anyconnect
+Group=anyconnect
+DynamicUser=true

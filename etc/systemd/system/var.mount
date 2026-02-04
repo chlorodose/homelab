@@ -1,0 +1,6 @@
+[Mount]
+What=LABEL=data
+TimeoutSec=5min
+
+[Install]
+WantedBy=local-fs.target

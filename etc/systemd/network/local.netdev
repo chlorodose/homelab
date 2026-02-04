@@ -1,0 +1,7 @@
+[NetDev]
+Description=Local network
+Kind=bridge
+Name=local
+
+[Bridge]
+STP=false

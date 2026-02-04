@@ -1,0 +1,6 @@
+[Match]
+Driver=ixgbe
+Type=ether
+
+[Network]
+Bridge=local

@@ -1,0 +1,7 @@
+[Match]
+Driver=r8169
+
+[Link]
+Description=Carrier of wan
+NamePolicy=
+Name=wanc

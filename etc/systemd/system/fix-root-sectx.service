@@ -1,0 +1,10 @@
+[Unit]
+DefaultDependencies=false
+Before=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=chcon -t root_t /
+
+[Install]
+RequiredBy=local-fs.target
