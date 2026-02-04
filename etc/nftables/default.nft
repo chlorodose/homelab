@@ -1,0 +1,4 @@
+flush ruleset
+include "basic.nft"
+include "host.nft"
+include "pppoe.nft"

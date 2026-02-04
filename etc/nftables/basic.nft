@@ -1,0 +1,52 @@
+table inet basic {
+    counter ping-count {}
+    limit ping-limit { rate 4/second burst 16 packets }
+    counter ssh-count {}
+    counter mdns-count {}
+    counter http-count {}
+    counter icmp-count {}
+    counter dhcp-count {}
+    counter game-count {}
+    limit reject-limit { rate 16/second burst 128 packets }
+
+    set trusted_interfaces {
+        type iface_index
+    }
+
+    chain flush-invalid {
+
+        return
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        iif != @trusted_interfaces ct state invalid counter drop
+        iif != @trusted_interfaces meta l4proto icmp icmp type {address-mask-request, timestamp-request} counter drop comment "SUS icmp"
+
+        tcp dport 22 counter name "ssh-count" accept
+        udp dport 5353 counter name "mdns-count" accept
+        tcp dport {80, 443} counter name "http-count" accept
+        udp dport 443 counter name "http-count" accept comment
+        udp dport {67, 68, 546, 547} counter name "dhcp-count" accept
+        udp dport 51820 accept comment "WireGuard"
+        tcp dport {27036, 27037, 27015, 27040} counter name "game-count" accept comment "accept game traffic"
+        udp dport {27015, 27031, 27032, 27033, 27034, 27035, 27036, 27040, 10400, 10401} counter name "game-count" accept comment "accept game traffic"
+        ct state { established, related } accept comment "dont break current connections"
+
+        iif @trusted_interfaces accept comment "accept traffic from trusted ifs"
+
+        meta l4proto icmp limit name "ping-limit" counter name "icmp-count" accept
+        meta l4proto ipv6-icmp limit name "ping-limit" counter name "icmp-count" accept
+
+        limit name "reject-limit" counter reject with icmpx type admin-prohibited comment "reject with icmp, but with an limit"
+    }
+
+    chain forward-filter {
+        type filter hook forward priority filter; policy drop
+        ct state invalid counter drop
+        ct state { established, related } accept
+        iif @trusted_interfaces accept comment "accept traffic from trusted ifs"
+        limit name "reject-limit" counter reject with icmpx type admin-prohibited comment "reject with icmp, but with an limit"
+    }
+}

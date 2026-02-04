@@ -1,0 +1,47 @@
+[Unit]
+After=sysinit.target
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+DefaultDependencies=false
+Description=Load nftables
+Wants=network-pre.target sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStartPre=nft -c /etc/nftables/default.nft
+ExecStart=nft -f /etc/nftables/default.nft
+ExecStop=nft flush ruleset
+
+[Service]
+KeyringMode=private
+LockPersonality=true
+MemoryDenyWriteExecute=true
+PrivateDevices=true
+PrivateIPC=true
+PrivateMounts=true
+PrivateNetwork=false
+PrivateTmp=disconnected
+ProtectClock=true
+ProtectControlGroups=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=ptraceable
+ProtectSystem=strict
+RemainAfterExit=true
+RemoveIPC=true
+Restart=on-failure
+RestartMaxDelaySec=10s
+RestartSteps=5
+RestrictAddressFamilies=AF_NETLINK
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+StateDirectory=nftables
+SystemCallArchitectures=native
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+DynamicUser=true

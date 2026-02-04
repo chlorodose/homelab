@@ -1,0 +1,11 @@
+table inet pppoe {
+    set pppoe_interfaces {
+        type iface_index
+    }
+
+    chain fix-mtu {
+        type filter hook postrouting priority raw; policy accept;
+        iif @pppoe_interfaces tcp flags syn tcp option maxseg size set rt mtu
+        oif @pppoe_interfaces tcp flags syn tcp option maxseg size set rt mtu
+    }
+}

@@ -1,0 +1,10 @@
+[Match]
+Name=wg
+Type=wireguard
+
+[Network]
+Address=192.168.0.1/32
+Address=fd00::1/128
+
+[Address]
+NFTSet=ifindex:inet:basic:trusted_interfaces

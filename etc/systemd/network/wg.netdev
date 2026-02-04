@@ -1,0 +1,15 @@
+[NetDev]
+Kind=wireguard
+Name=wg
+
+[WireGuard]
+ListenPort=51820
+PrivateKey=@network.wireguard.private.wg
+RouteTable=local
+
+# Phone
+[WireGuardPeer]
+AllowedIPs=192.168.182.2/32
+AllowedIPs=fd00::5182:2/128
+PresharedKey=@network.wireguard.peers.preshare.phone
+PublicKey=@network.wireguard.peers.public.phone
