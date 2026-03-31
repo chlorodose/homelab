@@ -1,0 +1,117 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: cilium
+spec:
+  url: oci://quay.io/cilium/charts/cilium
+  ref:
+    semver: "^1.19"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cilium
+spec:
+  targetNamespace: kube-system
+  chartRef:
+    kind: OCIRepository
+    name: cilium
+  values:
+    upgradeCompatibility: "1.19"
+    kubeProxyReplacement: true
+    k8sServiceHost: localhost
+    k8sServicePort: 7445
+    identityManagementMode: operator
+    l7Proxy: true
+    l2announcements:
+      enabled: true
+    ipam:
+      mode: kubernetes
+    hubble:
+      ui:
+        enabled: true
+      relay:
+        enabled: true
+    k8sClientRateLimit:
+      qps: 32
+      burst: 128
+    envoy:
+      enabled: false
+    securityContext:
+      capabilities:
+        cleanCiliumState:
+          - NET_ADMIN
+          - SYS_ADMIN
+          - SYS_RESOURCE
+        ciliumAgent:
+          - CHOWN
+          - KILL
+          - NET_ADMIN
+          - NET_RAW
+          - IPC_LOCK
+          - SYS_ADMIN
+          - SYS_RESOURCE
+          - DAC_OVERRIDE
+          - FOWNER
+          - SETGID
+          - SETUID
+    cgroup:
+      hostRoot: /sys/fs/cgroup
+      autoMount:
+        enabled: false
+---
+apiVersion: "cilium.io/v2"
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: default
+spec:
+  blocks:
+    - cidr: "192.168.100.0/24"
+---
+apiVersion: "cilium.io/v2alpha1"
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: clilium-l2
+spec:
+  serviceSelector: {}
+  nodeSelector: {}
+  interfaces:
+    - ".*"
+  externalIPs: true
+  loadBalancerIPs: true
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-hubble-ui
+  namespace: kube-system
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: hubble-ui
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: hubble-ui
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - hubble.internal.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: hubble-ui
+          namespace: kube-system
+          kind: Service
+          port: 80

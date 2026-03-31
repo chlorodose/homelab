@@ -1,0 +1,302 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: cnpg
+spec:
+  url: oci://ghcr.io/cloudnative-pg/charts/cloudnative-pg
+  ref:
+    semver: "^0.28"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cnpg
+spec:
+  targetNamespace: manager
+  chartRef:
+    kind: OCIRepository
+    name: cnpg
+  values:
+    crds:
+      create: false
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: cnpg-plugin-barman
+spec:
+  url: oci://ghcr.io/cloudnative-pg/charts/plugin-barman-cloud
+  ref:
+    semver: "^0.6"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cnpg-plugin-barman
+spec:
+  targetNamespace: manager
+  chartRef:
+    kind: OCIRepository
+    name: cnpg-plugin-barman
+  values:
+    crds:
+      create: false
+    certificate:
+      issuerName: cnpg-barman-selfsigned
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres
+  namespace: database
+spec:
+  instances: 1
+  storage:
+    size: 128Gi
+    storageClass: dbstore
+  certificates:
+    serverCASecret: cnpg-ca
+    clientCASecret: cnpg-ca
+    serverTLSSecret: postgres-server
+    replicationTLSSecret: postgres-streaming-replica
+  managed:
+    roles:
+      - name: vaultwarden
+        login: true
+        disablePassword: true
+      - name: authentik
+        login: true
+        disablePassword: true
+      - name: n8n
+        login: true
+        disablePassword: true
+  postgresql:
+    pg_hba:
+      - hostssl all all all cert
+    parameters:
+      max_connections: "128"
+      max_worker_processes: "14"
+      shared_buffers: "8GB"
+      work_mem: "8MB"
+      maintenance_work_mem: "256MB"
+      log_checkpoints: "on"
+      log_connections: "on"
+      log_disconnections: "on"
+      checkpoint_timeout: "15min"
+      checkpoint_warning: "5min"
+      min_wal_size: "2GB"
+      max_wal_size: "4GB"
+      vacuum_cost_limit: "2048"
+      autovacuum_max_workers: "8"
+      autovacuum_vacuum_scale_factor: "0.05"
+      autovacuum_analyze_scale_factor: "0.02"
+      effective_cache_size: "4GB"
+      random_page_cost: "1.2"
+      jit: "on"
+      pg_stat_statements.max: "16384"
+      pg_stat_statements.track: "all"
+    shared_preload_libraries:
+      - "pg_stat_statements"
+  bootstrap:
+    initdb:
+      dataChecksums: true
+    # recovery:
+    #   source: origin
+    #   recoveryTarget:
+    #     targetTime: "2023-08-11 11:14:21.00000+02"
+  resources:
+    requests:
+      memory: "12Gi"
+      cpu: "14"
+    limits:
+      memory: "12Gi"
+      cpu: "14"
+  affinity:
+    tolerations:
+      - key: admin.me/dedicated
+        operator: Equal
+        value: database
+        effect: PreferNoSchedule
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: talos.dev/hasUserVolume
+                operator: In
+                values:
+                  - dbstore
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: garage-postgres-backup
+  externalClusters:
+    - name: origin
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: garage-postgres-backup
+          serverName: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: postgres-backup
+  namespace: database
+spec:
+  schedule: "0 0 0 * * *"
+  backupOwnerReference: self
+  cluster:
+    name: postgres
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+---
+apiVersion: garage.rajsingh.info/v1alpha1
+kind: GarageBucket
+metadata:
+  name: postgres-backup
+  namespace: database
+spec:
+  clusterRef:
+    name: garage
+  quotas:
+    maxSize: 256Gi
+---
+apiVersion: garage.rajsingh.info/v1alpha1
+kind: GarageKey
+metadata:
+  name: garage-postgres-backup-key
+  namespace: database
+spec:
+  clusterRef:
+    name: garage
+  bucketPermissions:
+    - bucketRef: postgres-backup
+      read: true
+      write: true
+      owner: true
+  secretTemplate:
+    labels:
+      cnpg.io/reload: "true"
+---
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: garage-postgres-backup
+  namespace: database
+spec:
+  configuration:
+    destinationPath: "s3://postgres-backup/"
+    endpointURL: "http://garage.database.svc.cluster.local:3900"
+    s3Credentials:
+      accessKeyId:
+        name: garage-postgres-backup-key
+        key: access-key-id
+      secretAccessKey:
+        name: garage-postgres-backup-key
+        key: secret-access-key
+      region:
+        name: garage-postgres-backup-key
+        key: region
+    data:
+      compression: gzip
+      jobs: 4
+    wal:
+      compression: zstd
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cnpg-ca
+  namespace: database
+spec:
+  isCA: true
+  commonName: cnpg-ca
+  secretName: cnpg-ca
+  secretTemplate:
+    labels:
+      cnpg.io/reload: "true"
+  issuerRef:
+    name: selfsigned
+    kind: ClusterIssuer
+---
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TCPRoute
+metadata:
+  name: postgres
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+      sectionName: postgres
+  rules:
+    - name: route
+      backendRefs:
+        - name: postgres-rw
+          namespace: database
+          kind: Service
+          port: 5432
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-postgres
+  namespace: database
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: TCPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: postgres-rw
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: cnpg-ca
+  namespace: database
+spec:
+  ca:
+    secretName: cnpg-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-server
+  namespace: database
+spec:
+  secretName: postgres-server
+  secretTemplate:
+    labels:
+      cnpg.io/reload: "true"
+  usages:
+    - server auth
+  commonName: postgres
+  dnsNames:
+    - postgres.internal.chlorodose.me
+    - postgres-rw.database.svc
+    - postgres-r.database.svc
+    - postgres-ro.database.svc
+  issuerRef:
+    name: cnpg-ca
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-streaming-replica
+  namespace: database
+spec:
+  secretName: postgres-streaming-replica
+  secretTemplate:
+    labels:
+      cnpg.io/reload: "true"
+  usages:
+    - client auth
+  commonName: streaming_replica
+  issuerRef:
+    name: cnpg-ca
+    kind: Issuer

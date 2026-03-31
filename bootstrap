@@ -1,0 +1,33 @@
+#!/bin/sh
+set -e
+
+load() {
+    url="$(NAME="$2" yq 'select(.kind == "OCIRepository") | select(.metadata.name == env(NAME)) | .spec.url' "$1")"
+    version="$(NAME="$2" yq 'select(.kind == "OCIRepository") | select(.metadata.name == env(NAME)) | .spec.ref.semver' "$1")"
+    values="$(NAME="$3" yq 'select(.kind == "HelmRelease") | select(.metadata.name == env(NAME)) | .spec.values' "$1")"
+}
+
+cd "$(dirname $0)"
+
+if ! kubectl get -f fluxcd/ns.yaml; then
+    kubectl apply --server-side -f fluxcd/ns.yaml
+fi
+
+if ! helm status gateway-crds -n flux-system; then
+    load crd/gateway-crds.yaml gateway-crds gateway-crds
+    echo "$values" | helm install gateway-crds -n flux-system --version "$version" -f - "$url"
+fi
+
+if ! helm status cilium -n kube-system; then
+    load infra/cilium.yaml cilium cilium
+    echo "$values" | helm install cilium -n kube-system --version "$version" -f - "$url"
+fi
+
+if ! helm status flux-operator -n flux-system; then
+    load fluxcd/flux.yaml flux-operator flux-operator
+    echo "$values" | helm install flux-operator -n flux-system --version "$version" -f - "$url"
+fi
+
+if ! kubectl -n flux-system get -f fluxcd/root.yaml; then
+    kubectl -n flux-system apply --server-side -f fluxcd/root.yaml
+fi

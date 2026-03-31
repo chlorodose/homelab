@@ -1,0 +1,17 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: victoria-crds
+spec:
+  url: oci://ghcr.io/victoriametrics/helm-charts/victoria-metrics-operator-crds
+  ref:
+    semver: "^0.8"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: victoria-crds
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: victoria-crds

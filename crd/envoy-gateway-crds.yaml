@@ -1,0 +1,23 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: envoy-gateway-crds
+spec:
+  url: oci://registry-1.docker.io/envoyproxy/gateway-crds-helm
+  ref:
+    semver: "^1.6"
+# --- TODO: Too large to helm
+# apiVersion: helm.toolkit.fluxcd.io/v2
+# kind: HelmRelease
+# metadata:
+#   name: envoy-gateway-crds
+# spec:
+#   chartRef:
+#     kind: OCIRepository
+#     name: envoy-gateway-crds
+#   values:
+#     crds:
+#       gatewayAPI:
+#         enabled: false
+#       envoyGateway:
+#         enabled: true

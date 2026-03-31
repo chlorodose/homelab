@@ -1,0 +1,215 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: vaultwarden
+spec:
+  url: https://gissilabs.github.io/charts/
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmChart
+metadata:
+  name: vaultwarden
+spec:
+  chart: vaultwarden
+  sourceRef:
+    kind: HelmRepository
+    name: vaultwarden
+  version: "^1.4"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: vaultwarden
+spec:
+  targetNamespace: service
+  chartRef:
+    kind: HelmChart
+    name: vaultwarden
+  values:
+    vaultwarden:
+      domain: "https://vaultwarden.chlorodose.me"
+      admin:
+        enabled: true
+        existingSecret: vaultwarden-admin-token
+      extraEnv:
+        # DATA_FOLDER: s3://vaultwarden/
+        # RSA_KEY_FILENAME: s3://vaultwarden/rsa_key
+        # ATTACHMENTS_FOLDER: s3://vaultwarden/attachments
+        # SENDS_FOLDER: s3://vaultwarden/attachments
+        AWS_ACCESS_KEY_ID:
+          secretKeyRef:
+            name: garage-vaultwarden-key
+            key: access-key-id
+        AWS_SECRET_ACCESS_KEY:
+          secretKeyRef:
+            name: garage-vaultwarden-key
+            key: secret-access-key
+        AWS_ENDPOINT_URL_S3:
+          secretKeyRef:
+            name: garage-vaultwarden-key
+            key: endpoint
+        AWS_REGION:
+          secretKeyRef:
+            name: garage-vaultwarden-key
+            key: region
+        ICON_CACHE_FOLDER: data/icon_cache
+        TMP_FOLDER: data/tmp
+        TEMPLATES_FOLDER: data/templates
+    persistence:
+      enabled: true
+      storageClass: proxmox-storage
+      size: 4Gi
+    additionalVolumes:
+      - name: database-certs-volume
+        secret:
+          secretName: postgres-vaultwarden
+          defaultMode: 0400
+    additionalVolumeMounts:
+      - name: database-certs-volume
+        mountPath: /run/database-certs
+        readOnly: true
+    database:
+      type: postgresql
+      url: "postgresql://vaultwarden@postgres-rw.database.svc/vaultwarden?sslmode=verify-full&sslrootcert=%2Frun%2Fdatabase-certs%2Fca.crt&sslcert=%2Frun%2Fdatabase-certs%2Ftls.crt&sslkey=%2Frun%2Fdatabase-certs%2Ftls.key"
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: vaultwarden
+  namespace: database
+spec:
+  name: vaultwarden
+  owner: vaultwarden
+  cluster:
+    name: postgres
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-vaultwarden
+  namespace: database
+spec:
+  secretName: postgres-vaultwarden
+  secretTemplate:
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"
+  usages:
+    - client auth
+  commonName: vaultwarden
+  issuerRef:
+    name: cnpg-ca
+    kind: Issuer
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-vaultwarden
+  namespace: service
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: vaultwarden
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vaultwarden
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - vaultwarden.internal.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: vaultwarden
+          namespace: service
+          kind: Service
+          port: 80
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata:
+  name: vaultwarden-expose-deny-admin-filter
+  namespace: manager
+spec:
+  directResponse:
+    statusCode: 403
+    contentType: text/plain
+    body:
+      type: Inline
+      inline: "Forbidden: Access to /admin is restricted on this domain."
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vaultwarden-expose
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - vaultwarden.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /admin
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: gateway.envoyproxy.io
+            kind: HTTPRouteFilter
+            name: vaultwarden-expose-deny-admin-filter
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: vaultwarden
+          namespace: service
+          kind: Service
+          port: 80
+---
+apiVersion: garage.rajsingh.info/v1alpha1
+kind: GarageBucket
+metadata:
+  name: vaultwarden
+  namespace: database
+spec:
+  clusterRef:
+    name: garage
+  quotas:
+    maxSize: 10Gi
+---
+apiVersion: garage.rajsingh.info/v1alpha1
+kind: GarageKey
+metadata:
+  name: garage-vaultwarden-key
+  namespace: database
+spec:
+  clusterRef:
+    name: garage
+  bucketPermissions:
+    - bucketRef: vaultwarden
+      read: true
+      write: true
+      owner: true
+  secretTemplate:
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"

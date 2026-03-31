@@ -1,0 +1,11 @@
+kind: Node
+apiVersion: v1
+metadata:
+  name: dbworker0
+  labels:
+    talos.dev/hasUserVolume: dbstore
+spec:
+  taints:
+    - effect: PreferNoSchedule
+      key: admin.me/dedicated
+      value: database

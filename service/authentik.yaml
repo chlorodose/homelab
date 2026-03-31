@@ -1,0 +1,164 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: authentik
+spec:
+  url: https://charts.goauthentik.io
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmChart
+metadata:
+  name: authentik
+spec:
+  chart: authentik
+  sourceRef:
+    kind: HelmRepository
+    name: authentik
+  version: "^2026.2"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: authentik
+spec:
+  targetNamespace: service
+  chartRef:
+    kind: HelmChart
+    name: authentik
+  values:
+    authentik:
+      enabled: true
+      error_reporting:
+        enabled: true
+      postgresql:
+        host: postgres-rw.database.svc
+        port: 5432
+        name: authentik
+        user: authentik
+    global:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      env:
+        - name: AUTHENTIK_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: authentik-mainkey
+              key: token
+        - name: AUTHENTIK_POSTGRESQL__SSLMODE
+          value: verify-full
+        - name: AUTHENTIK_POSTGRESQL__SSLROOTCERT
+          value: /run/pgcerts/ca.crt
+        - name: AUTHENTIK_POSTGRESQL__SSLCERT
+          value: /run/pgcerts/tls.crt
+        - name: AUTHENTIK_POSTGRESQL__SSLKEY
+          value: /run/pgcerts/tls.key
+      volumes:
+        - name: postgres-certs
+          secret:
+            secretName: postgres-authentik
+            defaultMode: 0400
+      volumeMounts:
+        - name: postgres-certs
+          mountPath: /run/pgcerts
+          readOnly: true
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: authentik
+  namespace: database
+spec:
+  name: authentik
+  owner: authentik
+  cluster:
+    name: postgres
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-authentik
+  namespace: database
+spec:
+  secretName: postgres-authentik
+  secretTemplate:
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"
+  usages:
+    - client auth
+  commonName: authentik
+  issuerRef:
+    name: cnpg-ca
+    kind: Issuer
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-authentik
+  namespace: service
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: authentik-server
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: authentik
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - authentik.internal.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: authentik-server
+          namespace: service
+          kind: Service
+          port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-authentik-ldap
+  namespace: service
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: TCPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: ak-outpost-ldap
+---
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TCPRoute
+metadata:
+  name: authentik-ldap
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+      sectionName: ldaps
+  rules:
+    - name: route
+      backendRefs:
+        - name: ak-outpost-ldap
+          namespace: service
+          kind: Service
+          port: 636

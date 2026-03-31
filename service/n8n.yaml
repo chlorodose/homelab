@@ -1,0 +1,84 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: n8n
+spec:
+  url: oci://8gears.container-registry.com/library/n8n
+  ref:
+    semver: "^1.0"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: n8n
+spec:
+  targetNamespace: service
+  chartRef:
+    kind: OCIRepository
+    name: n8n
+  values:
+    main:
+      config:
+        db:
+          type: postgresdb
+          postgresdb:
+            host: postgres-rw.database.svc
+            user: n8n
+            database: n8n
+            ssl:
+              enabled: true
+              reject_unauthorized: true
+              ca_file: "/run/database-certs/ca.crt"
+              cert_file: "/run/database-certs/tls.crt"
+              key_file: "/run/database-certs/tls.key"
+      extraEnv:
+        N8N_ENCRYPTION_KEY:
+          valueFrom:
+            secretKeyRef:
+              name: n8n-key
+              key: key
+        N8N_LICENSE_ACTIVATION_KEY:
+          valueFrom:
+            secretKeyRef:
+              name: n8n-key
+              key: license
+      extraVolumeMounts:
+        - name: database-certs-volume
+          mountPath: /run/database-certs
+          readOnly: true
+      extraVolumes:
+        - name: database-certs-volume
+          secret:
+            secretName: postgres-n8n
+            defaultMode: 0400
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: n8n
+  namespace: database
+spec:
+  name: n8n
+  owner: n8n
+  cluster:
+    name: postgres
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-n8n
+  namespace: database
+spec:
+  secretName: postgres-n8n
+  secretTemplate:
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"
+  usages:
+    - client auth
+  commonName: n8n
+  issuerRef:
+    name: cnpg-ca
+    kind: Issuer

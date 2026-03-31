@@ -1,0 +1,129 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: envoy-gateway
+spec:
+  url: oci://docker.io/envoyproxy/gateway-helm
+  ref:
+    semver: "^1.7"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: envoy-gateway
+spec:
+  targetNamespace: manager
+  chartRef:
+    kind: OCIRepository
+    name: envoy-gateway
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: default
+  namespace: manager
+spec:
+  logging:
+    level:
+      default: info
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyServiceAccount: {}
+      envoyService:
+        name: default-gateway
+        type: LoadBalancer
+        loadBalancerClass: io.cilium/l2-announcer
+        externalTrafficPolicy: Cluster
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: default
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  description: The default GatewayClass
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: default
+    namespace: manager
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: enable-http3
+  namespace: manager
+spec:
+  http3: {}
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: default
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: default
+  namespace: manager
+spec:
+  gatewayClassName: default
+  addresses:
+    - type: IPAddress
+      value: 192.168.100.1
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+        kinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: Same
+        kinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: "internal.chlorodose.me"
+    - name: postgres
+      protocol: TCP
+      port: 5432
+      allowedRoutes:
+        namespaces:
+          from: Same
+        kinds:
+          - group: gateway.networking.k8s.io
+            kind: TCPRoute
+    - name: ldaps
+      protocol: TCP
+      port: 636
+      allowedRoutes:
+        namespaces:
+          from: Same
+        kinds:
+          - group: gateway.networking.k8s.io
+            kind: TCPRoute
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: "internal.chlorodose.me"
+  namespace: manager
+spec:
+  secretName: "internal.chlorodose.me"
+  issuerRef:
+    name: "chlorodose.me"
+    kind: Issuer
+  commonName: "internal.chlorodose.me"
+  dnsNames:
+    - "*.internal.chlorodose.me"
+    - "internal.chlorodose.me"

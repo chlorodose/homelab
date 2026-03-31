@@ -1,0 +1,19 @@
+version: v1alpha1
+machine:
+  type: worker
+  nodeLabels:
+    talos.dev/hasUserVolume: dbstore
+  nodeTaints:
+    admin.me/dedicated: database:NoSchedule
+---
+apiVersion: v1alpha1
+kind: HostnameConfig
+hostname: dbworker0.cluster.local
+---
+apiVersion: v1alpha1
+kind: UserVolumeConfig
+name: dbstore
+provisioning:
+  diskSelector:
+    match: disk.dev_path == '/dev/sdb'
+  minSize: 64GiB

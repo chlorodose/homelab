@@ -1,0 +1,54 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: proxmox-csi
+spec:
+  url: oci://ghcr.io/sergelogvinov/charts/proxmox-csi-plugin
+  ref:
+    semver: "^0.5"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: proxmox-csi
+spec:
+  targetNamespace: kube-system
+  chartRef:
+    kind: OCIRepository
+    name: proxmox-csi
+  values:
+    nodeSelector:
+      node-role.kubernetes.io/control-plane: ""
+    tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        effect: NoSchedule
+    node:
+      tolerations:
+        - operator: Exists
+    storageClass:
+      - name: proxmox-storage
+        storage: k8s-storage
+        cache: none
+        ssd: "false"
+        fstype: xfs
+        reclaimPolicy: Delete
+      - name: proxmox-cache
+        storage: k8s-cache
+        cache: unsafe
+        ssd: "false"
+        fstype: xfs
+        reclaimPolicy: Delete
+      - name: proxmox-dat
+        storage: k8s-cache
+        cache: unsafe
+        ssd: "false"
+        fstype: xfs
+        mountOptions:
+          - noatime
+        reclaimPolicy: Delete
+      - name: proxmox-nvram
+        storage: k8s-storage-nvram
+        cache: none
+        ssd: "true"
+        fstype: xfs
+        reclaimPolicy: Delete
