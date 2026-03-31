@@ -1,0 +1,66 @@
+machine: {}
+cluster:
+  proxy:
+    disabled: true
+  externalCloudProvider:
+    enabled: true
+---
+apiVersion: v1alpha1
+kind: HostnameConfig
+$patch: delete
+---
+apiVersion: v1alpha1
+kind: TimeSyncConfig
+ntp:
+  useNTS: false
+  servers:
+    - time.cloudflare.com
+---
+apiVersion: v1alpha1
+kind: FilesystemTrimConfig
+interval: 24h0m0s
+---
+apiVersion: v1alpha1
+kind: FilesystemScrubConfig
+interval: 168h0m0s
+---
+apiVersion: v1alpha1
+kind: ResolverConfig
+hostDNS:
+  enabled: true
+  forwardKubeDNSToHost: true
+  resolveMemberNames: false
+---
+apiVersion: v1alpha1
+kind: UnattendedInstallConfig
+installer:
+  image: factory.talos.dev/metal-installer/03f48d8cb12f3aa63315a70a88dc361beca3e26be7e27b5f7f650e14f16474e0:v1.14.0
+provisioning:
+  diskSelector:
+    match: disk.dev_path == "/dev/sda"
+  wipe: true
+---
+apiVersion: v1alpha1
+kind: KubeNetworkConfig
+dnsDomain: cluster.local
+podSubnets:
+  - 10.244.0.0/16
+serviceSubnets:
+  - 10.96.0.0/12
+---
+apiVersion: v1alpha1
+kind: SysctlConfig
+params:
+  vm.nr_hugepages: "1024"
+---
+apiVersion: v1alpha1
+kind: CRICustomizationConfig
+name: spegel
+content: |
+  [plugins."io.containerd.cri.v1.images"]
+    discard_unpacked_layers = false
+---
+apiVersion: v1alpha1
+kind: UdevRulesConfig
+rules:
+  - SUBSYSTEM=="block", ENV{ID_SCSI_SERIAL}!="", ENV{DEVTYPE}=="disk", SYMLINK+="disk/by-scsi-serial/$env{ID_SCSI_SERIAL}"

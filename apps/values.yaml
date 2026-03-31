@@ -1,0 +1,53 @@
+applications:
+  - name: victoria
+    namespace: victoria
+    repoURL: https://victoriametrics.github.io/helm-charts
+    chart: victoria-metrics-operator
+    targetRevision: 0.59.3
+    spec:
+      operator:
+        enable_converter_ownership: true
+        prometheus_converter_add_argocd_ignore_annotations: true
+      admissionWebhooks:
+        certManager:
+          enabled: true
+      serviceMonitor:
+        enabled: true
+  - name: node-exporter
+    namespace: monitor-system
+    privileged: true
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: prometheus-node-exporter
+    targetRevision: 4.52.2
+    spec:
+      prometheus:
+        monitor:
+          enabled: true
+  - name: kube-state-metrics
+    namespace: monitor-system
+    externalNamespace: true
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-state-metrics
+    targetRevision: 7.2.2
+    spec:
+      prometheus:
+        monitor:
+          enabled: true
+  - name: prometheus-adapter
+    namespace: kube-system
+    externalNamespace: true
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: prometheus-adapter
+    targetRevision: 5.3.0
+    spec:
+      prometheus:
+        url: http://vmsingle-default.victoria.svc
+        port: 8428
+  - name: grafana
+    namespace: grafana
+    repoURL: https://grafana.github.io/helm-charts
+    chart: grafana-operator
+    targetRevision: 5.22.2
+    spec:
+      serviceMonitor:
+        enabled: true

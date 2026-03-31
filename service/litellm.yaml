@@ -1,0 +1,175 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: litellm
+  namespace: service
+spec:
+  url: oci://ghcr.io/berriai/litellm-helm
+  ref:
+    tag: "1.90.2"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: litellm
+  namespace: service
+spec:
+  targetNamespace: service
+  chartRef:
+    kind: OCIRepository
+    name: litellm
+  values:
+    replicaCount: 1
+    service:
+      type: ClusterIP
+      port: 4000
+    envVars:
+      DD_ENV: dev_helm
+      DD_SERVICE: litellm
+      USE_DDTRACE: "true"
+      STORE_MODEL_IN_DB: "True"
+    masterkeySecretName: litellm-masterkey
+    masterkeySecretKey: masterkey
+    db:
+      useExisting: true
+      deployStandalone: false
+      endpoint: postgres-rw.database.svc
+      database: litellm
+      url: "postgresql://$(DATABASE_USERNAME):$(DATABASE_PASSWORD)@$(DATABASE_HOST):5432/$(DATABASE_NAME)?sslmode=disable"
+      secret:
+        name: litellm-database-token
+        usernameKey: username
+        passwordKey: password
+    environmentSecrets:
+      - litellm-env
+    proxyConfigMap:
+      create: true
+    proxy_config:
+      general_settings:
+        master_key: os.environ/PROXY_MASTER_KEY
+      router_settings:
+        cache: true
+        redis_host: os.environ/REDIS_HOST
+        redis_port: os.environ/REDIS_PORT
+        redis_password: os.environ/REDIS_PASSWORD
+      model_list:
+        - model_name: fake-openai
+          litellm_params:
+            model: openai/fake
+            api_key: fake-key
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-masterkey
+  namespace: service
+  annotations:
+    secret-generator.v1.mittwald.de/autogenerate: masterkey
+    secret-generator.v1.mittwald.de/encoding: hex
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-env
+  namespace: service
+  annotations:
+    secret-generator.v1.mittwald.de/autogenerate: REDIS_PASSWORD
+    secret-generator.v1.mittwald.de/encoding: hex
+type: Opaque
+stringData:
+  REDIS_HOST: litellm-redis.service.svc
+  REDIS_PORT: "6379"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-database-token
+  namespace: database
+  labels:
+    cnpg.io/reload: "true"
+  annotations:
+    reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+    reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"
+    secret-generator.v1.mittwald.de/autogenerate: password
+    secret-generator.v1.mittwald.de/encoding: hex
+type: kubernetes.io/basic-auth
+stringData:
+  username: litellm
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: litellm
+  namespace: database
+spec:
+  name: litellm
+  owner: litellm
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: litellm
+  namespace: database
+spec:
+  cluster:
+    name: postgres
+  name: litellm
+  login: true
+  superuser: false
+  createdb: false
+  databaseRoleReclaimPolicy: delete
+  passwordSecret:
+    name: litellm-database-token
+---
+apiVersion: dragonflydb.io/v1alpha1
+kind: Dragonfly
+metadata:
+  name: litellm-redis
+  namespace: service
+spec:
+  replicas: 1
+  authentication:
+    passwordFromSecret:
+      name: litellm-env
+      key: REDIS_PASSWORD
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-litellm
+  namespace: service
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: litellm
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: litellm
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - llm.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: litellm
+          namespace: service
+          kind: Service
+          port: 4000

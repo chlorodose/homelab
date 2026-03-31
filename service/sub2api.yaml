@@ -1,0 +1,479 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sub2api-database-token
+  namespace: database
+  labels:
+    cnpg.io/reload: "true"
+  annotations:
+    reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+    reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"
+    secret-generator.v1.mittwald.de/autogenerate: password
+    secret-generator.v1.mittwald.de/encoding: hex
+type: kubernetes.io/basic-auth
+stringData:
+  username: sub2api
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: sub2api
+  namespace: database
+spec:
+  name: sub2api
+  owner: sub2api
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: sub2api
+  namespace: database
+spec:
+  cluster:
+    name: postgres
+  name: sub2api
+  login: true
+  superuser: false
+  createdb: false
+  databaseRoleReclaimPolicy: delete
+  passwordSecret:
+    name: sub2api-database-token
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sub2api-redis-token
+  namespace: service
+  annotations:
+    secret-generator.v1.mittwald.de/autogenerate: password
+    secret-generator.v1.mittwald.de/encoding: hex
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sub2api-admin-token
+  namespace: service
+  annotations:
+    secret-generator.v1.mittwald.de/autogenerate: password
+    secret-generator.v1.mittwald.de/encoding: hex
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sub2api-jwt-token
+  namespace: service
+  annotations:
+    secret-generator.v1.mittwald.de/autogenerate: password
+    secret-generator.v1.mittwald.de/encoding: hex
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sub2api-totp-token
+  namespace: service
+  annotations:
+    secret-generator.v1.mittwald.de/autogenerate: password
+    secret-generator.v1.mittwald.de/encoding: hex
+type: Opaque
+---
+apiVersion: dragonflydb.io/v1alpha1
+kind: Dragonfly
+metadata:
+  name: sub2api-redis
+  namespace: service
+spec:
+  replicas: 1
+  authentication:
+    passwordFromSecret:
+      name: sub2api-redis-token
+      key: password
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sub2api-data
+  namespace: service
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: proxmox-nvram
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sub2api
+  namespace: service
+spec:
+  # Set to 1 once the image is published and the container settings are confirmed.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sub2api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sub2api
+    spec:
+      containers:
+        - name: sub2api
+          image: docker.io/weishaw/sub2api:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                - SETGID
+                - SETUID
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            exec:
+              command:
+                - wget
+                - -q
+                - -T
+                - "5"
+                - -O
+                - /dev/null
+                - http://localhost:8080/health
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - wget
+                - -q
+                - -T
+                - "5"
+                - -O
+                - /dev/null
+                - http://localhost:8080/health
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          env:
+            - name: AUTO_SETUP
+              value: "true"
+            - name: BIND_HOST
+              value: "0.0.0.0"
+            - name: SERVER_PORT
+              value: "8080"
+            - name: SERVER_MODE
+              value: "release"
+            - name: ENABLE_SERVER_TIMING
+              value: "false"
+            - name: LOG_LEVEL
+              value: "info"
+            - name: LOG_FORMAT
+              value: "json"
+            - name: LOG_SERVICE_NAME
+              value: "sub2api"
+            - name: LOG_ENV
+              value: "production"
+            - name: LOG_CALLER
+              value: "true"
+            - name: LOG_STACKTRACE_LEVEL
+              value: "error"
+            - name: LOG_OUTPUT_TO_STDOUT
+              value: "true"
+            - name: LOG_OUTPUT_TO_FILE
+              value: "true"
+            - name: LOG_OUTPUT_FILE_PATH
+              value: ""
+            - name: LOG_ROTATION_MAX_SIZE_MB
+              value: "100"
+            - name: LOG_ROTATION_MAX_BACKUPS
+              value: "10"
+            - name: LOG_ROTATION_MAX_AGE_DAYS
+              value: "7"
+            - name: LOG_ROTATION_COMPRESS
+              value: "true"
+            - name: LOG_ROTATION_LOCAL_TIME
+              value: "true"
+            - name: LOG_SAMPLING_ENABLED
+              value: "false"
+            - name: LOG_SAMPLING_INITIAL
+              value: "100"
+            - name: LOG_SAMPLING_THEREAFTER
+              value: "100"
+            - name: SERVER_MAX_REQUEST_BODY_SIZE
+              value: "268435456"
+            - name: GATEWAY_MAX_BODY_SIZE
+              value: "268435456"
+            - name: SERVER_H2C_ENABLED
+              value: "true"
+            - name: SERVER_H2C_MAX_CONCURRENT_STREAMS
+              value: "50"
+            - name: SERVER_H2C_IDLE_TIMEOUT
+              value: "75"
+            - name: SERVER_H2C_MAX_READ_FRAME_SIZE
+              value: "1048576"
+            - name: SERVER_H2C_MAX_UPLOAD_BUFFER_PER_CONNECTION
+              value: "2097152"
+            - name: SERVER_H2C_MAX_UPLOAD_BUFFER_PER_STREAM
+              value: "524288"
+            - name: RUN_MODE
+              value: "standard"
+            - name: SIMPLE_MODE_AUTO_CREATE_DEFAULT_GROUPS
+              value: ""
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: DATABASE_HOST
+              value: "postgres-rw.database.svc"
+            - name: DATABASE_PORT
+              value: "5432"
+            - name: DATABASE_SSLMODE
+              value: "disable"
+            - name: POSTGRES_DB
+              value: "sub2api"
+            - name: DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sub2api-database-token
+                  key: username
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sub2api-database-token
+                  key: username
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sub2api-database-token
+                  key: password
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sub2api-database-token
+                  key: password
+            - name: DATABASE_MAX_OPEN_CONNS
+              value: "256"
+            - name: DATABASE_MAX_IDLE_CONNS
+              value: "128"
+            - name: DATABASE_CONN_MAX_LIFETIME_MINUTES
+              value: "30"
+            - name: DATABASE_CONN_MAX_IDLE_TIME_MINUTES
+              value: "5"
+            - name: REDIS_HOST
+              value: "sub2api-redis.service.svc"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_USERNAME
+              value: ""
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sub2api-redis-token
+                  key: password
+            - name: REDIS_DB
+              value: "0"
+            - name: REDIS_POOL_SIZE
+              value: "4096"
+            - name: REDIS_MIN_IDLE_CONNS
+              value: "256"
+            - name: REDIS_ENABLE_TLS
+              value: "false"
+            - name: ADMIN_EMAIL
+              value: "admin@sub2api.local"
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sub2api-admin-token
+                  key: password
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sub2api-jwt-token
+                  key: password
+            - name: JWT_EXPIRE_HOUR
+              value: "24"
+            - name: JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+              value: "0"
+            - name: SETUP_MIGRATION_TIMEOUT_SECONDS
+              value: "0"
+            - name: TOTP_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sub2api-totp-token
+                  key: password
+            - name: RATE_LIMIT_OVERLOAD_COOLDOWN_MINUTES
+              value: "10"
+            - name: GATEWAY_FORCE_CODEX_CLI
+              value: "false"
+            - name: GATEWAY_OPENAI_COMPACT_MODEL
+              value: "gpt-5.5"
+            - name: SUB2API_IMAGES_MAIN_MODEL
+              value: "gpt-5.6-luna"
+            - name: GATEWAY_OPENAI_RESPONSE_HEADER_TIMEOUT
+              value: "0"
+            - name: GATEWAY_OPENAI_WS_FORCE_HTTP
+              value: "false"
+            - name: GATEWAY_OPENAI_HTTP2_ENABLED
+              value: "true"
+            - name: GATEWAY_OPENAI_HTTP2_ALLOW_PROXY_FALLBACK_TO_HTTP1
+              value: "true"
+            - name: GATEWAY_OPENAI_HTTP2_FALLBACK_ERROR_THRESHOLD
+              value: "2"
+            - name: GATEWAY_OPENAI_HTTP2_FALLBACK_WINDOW_SECONDS
+              value: "60"
+            - name: GATEWAY_OPENAI_HTTP2_FALLBACK_TTL_SECONDS
+              value: "600"
+            - name: GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_FAILURE_THRESHOLD
+              value: "2"
+            - name: GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_WINDOW_SECONDS
+              value: "60"
+            - name: GATEWAY_OPENAI_PROXY_STREAM_CIRCUIT_TTL_SECONDS
+              value: "600"
+            - name: GATEWAY_MAX_CONNS_PER_HOST
+              value: "2048"
+            - name: GATEWAY_MAX_IDLE_CONNS
+              value: "8192"
+            - name: GATEWAY_MAX_IDLE_CONNS_PER_HOST
+              value: "4096"
+            - name: GATEWAY_SCHEDULING_STICKY_SESSION_MAX_WAITING
+              value: "3"
+            - name: GATEWAY_SCHEDULING_STICKY_SESSION_WAIT_TIMEOUT
+              value: "120s"
+            - name: GATEWAY_SCHEDULING_FALLBACK_WAIT_TIMEOUT
+              value: "30s"
+            - name: GATEWAY_SCHEDULING_FALLBACK_MAX_WAITING
+              value: "100"
+            - name: GATEWAY_SCHEDULING_LOAD_BATCH_ENABLED
+              value: "true"
+            - name: GATEWAY_SCHEDULING_SLOT_CLEANUP_INTERVAL
+              value: "30s"
+            - name: GATEWAY_SCHEDULING_DB_FALLBACK_ENABLED
+              value: "true"
+            - name: GATEWAY_SCHEDULING_DB_FALLBACK_TIMEOUT_SECONDS
+              value: "0"
+            - name: GATEWAY_SCHEDULING_DB_FALLBACK_MAX_QPS
+              value: "0"
+            - name: GATEWAY_SCHEDULING_OUTBOX_POLL_INTERVAL_SECONDS
+              value: "1"
+            - name: GATEWAY_SCHEDULING_OUTBOX_LAG_WARN_SECONDS
+              value: "5"
+            - name: GATEWAY_SCHEDULING_OUTBOX_LAG_REBUILD_SECONDS
+              value: "10"
+            - name: GATEWAY_SCHEDULING_OUTBOX_LAG_REBUILD_FAILURES
+              value: "3"
+            - name: GATEWAY_SCHEDULING_OUTBOX_BACKLOG_REBUILD_ROWS
+              value: "10000"
+            - name: GATEWAY_SCHEDULING_FULL_REBUILD_INTERVAL_SECONDS
+              value: "300"
+            - name: GATEWAY_IMAGE_STREAM_DATA_INTERVAL_TIMEOUT
+              value: "900"
+            - name: GATEWAY_IMAGE_STREAM_KEEPALIVE_INTERVAL
+              value: "10"
+            - name: GATEWAY_IMAGE_NONSTREAM_KEEPALIVE_INTERVAL
+              value: "0"
+            - name: GATEWAY_IMAGE_CONCURRENCY_ENABLED
+              value: "false"
+            - name: GATEWAY_IMAGE_CONCURRENCY_MAX_CONCURRENT_REQUESTS
+              value: "0"
+            - name: GATEWAY_IMAGE_CONCURRENCY_OVERFLOW_MODE
+              value: "reject"
+            - name: GATEWAY_IMAGE_CONCURRENCY_WAIT_TIMEOUT_SECONDS
+              value: "30"
+            - name: GATEWAY_IMAGE_CONCURRENCY_MAX_WAITING_REQUESTS
+              value: "100"
+            - name: DASHBOARD_AGGREGATION_ENABLED
+              value: "true"
+            - name: DASHBOARD_AGGREGATION_INTERVAL_SECONDS
+              value: "60"
+            - name: DASHBOARD_AGGREGATION_LOOKBACK_SECONDS
+              value: "600"
+            - name: DASHBOARD_AGGREGATION_BACKFILL_ENABLED
+              value: "true"
+            - name: DASHBOARD_AGGREGATION_BACKFILL_MAX_DAYS
+              value: "60"
+            - name: DASHBOARD_AGGREGATION_RECOMPUTE_DAYS
+              value: "30"
+            - name: DASHBOARD_AGGREGATION_RETENTION_USAGE_LOGS_DAYS
+              value: "90"
+            - name: DASHBOARD_AGGREGATION_RETENTION_HOURLY_DAYS
+              value: "180"
+            - name: DASHBOARD_AGGREGATION_RETENTION_DAILY_DAYS
+              value: "730"
+            - name: SECURITY_URL_ALLOWLIST_ENABLED
+              value: "false"
+            - name: SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP
+              value: "false"
+            - name: SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS
+              value: "true"
+            - name: OPS_ENABLED
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: sub2api-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sub2api
+  namespace: service
+spec:
+  selector:
+    app.kubernetes.io/name: sub2api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-sub2api
+  namespace: service
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: sub2api
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: sub2api
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - sub2api.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: sub2api
+          namespace: service
+          kind: Service
+          port: 80

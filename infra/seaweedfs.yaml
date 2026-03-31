@@ -1,0 +1,272 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: seaweedfs
+spec:
+  url: https://seaweedfs.github.io/seaweedfs-operator/
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmChart
+metadata:
+  name: seaweedfs
+spec:
+  chart: seaweedfs-operator
+  sourceRef:
+    kind: HelmRepository
+    name: seaweedfs
+  version: "^0.1"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: seaweedfs
+spec:
+  targetNamespace: manager
+  chartRef:
+    kind: HelmChart
+    name: seaweedfs
+  values:
+    crds:
+      create: false
+    csiDriver:
+      enabled: true
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: Seaweed
+metadata:
+  name: seaweed
+  namespace: database
+spec:
+  admin:
+    credentialsSecret:
+      name: seaweedfs-admin-token
+    extraArgs:
+      - "-ip"
+      - "0.0.0.0"
+  filer:
+    config: |
+      [postgres2]
+      enabled  = true
+      hostname = "postgres-rw.database.svc"
+      database = "seaweedfs"
+      username = "seaweedfs"
+    env:
+      - name: WEED_POSTGRES2_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: seaweedfs-database-token
+            key: password
+    replicas: 1
+  image: chrislusf/seaweedfs:latest
+  worker:
+    replicas: 2
+    jobType: "all"
+    maxExecute: 4
+  master:
+    defaultReplication: "001"
+    persistence:
+      accessModes:
+        - ReadWriteOnce
+      enabled: true
+      mountPath: /data
+      resources:
+        requests:
+          storage: 1Gi
+      storageClassName: proxmox-nvram
+    replicas: 1
+    volumeSizeLimitMB: 1024
+  # backup:
+  #   storages:
+  #     local-backup:
+  #       type: filesystem
+  #       filesystem:
+  #         existingClaim: seaweedfs-filer-backup
+  #         mountPath: /backup
+  #         subPath: seaweedfs
+  #   schedule:
+  #     - name: daily
+  #       schedule: "0 3 * * *"
+  #       storageName: local-backup
+  #       filerPath: /
+  #       keep: 7
+  #       suspend: false
+  s3:
+    iam: true
+    replicas: 1
+  volume:
+    kind: StatefulSet
+    replicas: 0
+    requests:
+      storage: 1Gi
+  volumeServerDiskCount: 1
+  volumeTopology:
+    hddr:
+      dataCenter: default
+      rack: default
+      replicas: 4
+      requests:
+        storage: 1860Gi
+      storageClassName: hddr-volumes
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: seaweedfs-filer-backup
+  namespace: database
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: proxmox-nvram
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: ResourceReferenceGrant
+metadata:
+  name: may-allow-secrets-from-service
+  namespace: database
+spec:
+  from:
+    - group: seaweed.seaweedfs.com
+      kind: S3Credentials
+      namespace: service
+  to:
+    - group: seaweed.seaweedfs.com
+      kind: Seaweed
+---
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  name: seaweedfs-admin-token
+  namespace: database
+  annotations:
+    secret-generator.v1.mittwald.de/autogenerate: adminPassword
+    secret-generator.v1.mittwald.de/encoding: hex
+stringData:
+  adminUser: admin
+---
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/basic-auth
+metadata:
+  name: seaweedfs-database-token
+  namespace: database
+  labels:
+    cnpg.io/reload: "true"
+  annotations:
+    secret-generator.v1.mittwald.de/autogenerate: password
+    secret-generator.v1.mittwald.de/encoding: hex
+stringData:
+  username: seaweedfs
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: seaweedfs
+  namespace: database
+spec:
+  name: seaweedfs
+  owner: seaweedfs
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: seaweedfs
+  namespace: database
+spec:
+  cluster:
+    name: postgres
+  name: seaweedfs
+  login: true
+  superuser: false
+  createdb: false
+  databaseRoleReclaimPolicy: delete
+  passwordSecret:
+    name: seaweedfs-database-token
+# ---
+# apiVersion: seaweed.seaweedfs.com/v1
+# kind: SeaweedCSIDriver
+# metadata:
+#   name: seaweed
+#   namespace: database
+# spec:
+#   seaweedRef:
+#     name: seaweed
+#   driverName: seaweedfs
+#   image: chrislusf/seaweedfs-csi-driver:latest
+#   controller:
+#     replicas: 1
+#   node:
+#     kubeletPath: /var/lib/kubelet
+#   storageClass:
+#     name: seaweed
+#     isDefaultClass: false
+#     reclaimPolicy: Delete
+#     volumeBindingMode: Immediate
+#     allowVolumeExpansion: true
+#     parameters:
+#       replication: "000"
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-seaweed
+  namespace: database
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: seaweed-s3
+    - group: ""
+      kind: Service
+      name: seaweed-admin
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: seaweed-s3-expose
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - s3.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: seaweed-s3
+          namespace: database
+          kind: Service
+          port: 8333
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: seaweed-admin-expose
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - seaweed.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: seaweed-admin
+          namespace: database
+          kind: Service
+          port: 23646
