@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: manager
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: database
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: service
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: external

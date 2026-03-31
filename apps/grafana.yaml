@@ -1,0 +1,35 @@
+apiVersion: grafana.integreatly.org/v1beta1
+kind: Grafana
+metadata:
+  name: grafana
+  namespace: grafana
+  labels:
+    dashboards: grafana
+spec:
+  config:
+    log:
+      mode: console
+    security:
+      admin_user: root
+      admin_password: secret
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: grafana
+  namespace: grafana
+spec:
+  parentRefs:
+    - name: traefik-gateway
+      namespace: traefik
+  hostnames:
+    - grafana.internel.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: grafana-service
+          kind: Service
+          port: 3000

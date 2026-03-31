@@ -1,0 +1,18 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: reflector
+spec:
+  url: oci://ghcr.io/emberstack/helm-charts/reflector
+  ref:
+    semver: "^10.0"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: reflector
+spec:
+  targetNamespace: manager
+  chartRef:
+    kind: OCIRepository
+    name: reflector

@@ -1,0 +1,316 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: cnpg
+spec:
+  url: oci://ghcr.io/cloudnative-pg/charts/cloudnative-pg
+  ref:
+    semver: "^0.29"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cnpg
+spec:
+  targetNamespace: manager
+  chartRef:
+    kind: OCIRepository
+    name: cnpg
+  values:
+    crds:
+      create: false
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: cnpg-plugin-barman
+spec:
+  url: oci://ghcr.io/cloudnative-pg/charts/plugin-barman-cloud
+  ref:
+    semver: "^0.6"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cnpg-plugin-barman
+spec:
+  targetNamespace: manager
+  chartRef:
+    kind: OCIRepository
+    name: cnpg-plugin-barman
+  values:
+    crds:
+      create: false
+    certificate:
+      issuerName: cnpg-barman-selfsigned
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres
+  namespace: database
+spec:
+  instances: 3
+  storage:
+    size: 120Gi
+    storageClass: nvmb-volumes
+  certificates:
+    serverCASecret: db-ca
+    clientCASecret: db-ca
+    serverTLSSecret: postgres-server
+    replicationTLSSecret: postgres-streaming-replica
+  managed:
+    roles:
+      - name: chlorodose
+        login: true
+        superuser: true
+        disablePassword: true
+  postgresql:
+    pg_hba:
+      - hostssl all all all cert
+      - host    all all all scram-sha-256
+    parameters:
+      max_connections: "128"
+      max_worker_processes: "8"
+      shared_buffers: "2GB"
+      work_mem: "8MB"
+      maintenance_work_mem: "128MB"
+      log_checkpoints: "on"
+      log_connections: "on"
+      log_disconnections: "on"
+      checkpoint_timeout: "15min"
+      checkpoint_warning: "5min"
+      min_wal_size: "2GB"
+      max_wal_size: "4GB"
+      vacuum_cost_limit: "2048"
+      autovacuum_max_workers: "8"
+      autovacuum_vacuum_scale_factor: "0.05"
+      autovacuum_analyze_scale_factor: "0.02"
+      effective_cache_size: "4GB"
+      random_page_cost: "1.2"
+      jit: "on"
+      pg_stat_statements.max: "16384"
+      pg_stat_statements.track: "all"
+    shared_preload_libraries:
+      - "pg_stat_statements"
+  bootstrap:
+    # initdb:
+    #   dataChecksums: true
+    recovery:
+      source: origin
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "2"
+    limits:
+      memory: "8Gi"
+      cpu: "16"
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: pgbackup
+  externalClusters:
+    - name: origin
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: pgbackup
+          serverName: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: postgres-backup
+  namespace: database
+spec:
+  schedule: "0 0 0 * * *"
+  backupOwnerReference: cluster
+  cluster:
+    name: postgres
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: Bucket
+metadata:
+  name: pgbackup
+  namespace: database
+spec:
+  clusterRef:
+    name: seaweed
+  reclaimPolicy: Retain
+  adoptExisting: true
+  versioning: Off
+  objectLock: false
+  quota:
+    size: 128Gi
+    enforce: true
+  owner: pgbackup
+  access:
+    - user: pgbackup
+      actions: [Read, Write, List, Admin]
+  placement:
+    fsync: false
+    worm: false
+    readOnly: false
+  anonymousRead: false
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: S3Identity
+metadata:
+  name: pgbackup
+  namespace: database
+spec:
+  seaweedRef:
+    name: seaweed
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: S3Credentials
+metadata:
+  name: pgbackup
+  namespace: database
+spec:
+  seaweedRef:
+    name: seaweed
+  identityRef:
+    name: pgbackup
+  secretRef:
+    name: seaweed-pgbackup-key
+---
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: pgbackup
+  namespace: database
+spec:
+  retentionPolicy: "30d"
+  configuration:
+    destinationPath: "s3://pgbackup/"
+    endpointURL: "http://seaweed-s3.database.svc:8333"
+    s3Credentials:
+      accessKeyId:
+        name: seaweed-pgbackup-key
+        key: accessKey
+      secretAccessKey:
+        name: seaweed-pgbackup-key
+        key: secretKey
+    data:
+      compression: gzip
+      jobs: 4
+    wal:
+      compression: zstd
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: db-ca
+  namespace: database
+spec:
+  isCA: true
+  commonName: db-ca
+  secretName: db-ca
+  secretTemplate:
+    labels:
+      cnpg.io/reload: "true"
+  issuerRef:
+    name: selfsigned
+    kind: ClusterIssuer
+---
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TCPRoute
+metadata:
+  name: postgres
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+      sectionName: postgres
+  rules:
+    - name: route
+      backendRefs:
+        - name: postgres-rw
+          namespace: database
+          kind: Service
+          port: 5432
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-postgres
+  namespace: database
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: TCPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: postgres-rw
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: db-ca
+  namespace: database
+spec:
+  ca:
+    secretName: db-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-server
+  namespace: database
+spec:
+  secretName: postgres-server
+  secretTemplate:
+    labels:
+      cnpg.io/reload: "true"
+  usages:
+    - server auth
+  commonName: postgres
+  dnsNames:
+    - postgres.internal.chlorodose.me
+    - postgres-rw.database.svc
+    - postgres-r.database.svc
+    - postgres-ro.database.svc
+  issuerRef:
+    name: db-ca
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-chlorodose
+  namespace: database
+spec:
+  secretName: postgres-chlorodose
+  secretTemplate:
+    labels:
+      cnpg.io/reload: "true"
+  usages:
+    - client auth
+  commonName: chlorodose
+  issuerRef:
+    name: db-ca
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-streaming-replica
+  namespace: database
+spec:
+  secretName: postgres-streaming-replica
+  secretTemplate:
+    labels:
+      cnpg.io/reload: "true"
+  usages:
+    - client auth
+  commonName: streaming_replica
+  issuerRef:
+    name: db-ca
+    kind: Issuer

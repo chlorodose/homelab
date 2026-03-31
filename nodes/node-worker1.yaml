@@ -1,0 +1,7 @@
+version: v1alpha1
+machine:
+  type: worker
+---
+apiVersion: v1alpha1
+kind: HostnameConfig
+hostname: worker1.cluster.local

@@ -1,0 +1,93 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMSingle
+metadata:
+  name: default
+  namespace: victoria
+spec:
+  ingestOnlyMode: true
+  extraArgs:
+    dedup.minScrapeInterval: 15s
+  retentionPeriod: '12'
+  storage:
+    storageClassName: proxmox-nvram
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: 16Gi
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMAgent
+metadata:
+  name: default
+  namespace: kube-system
+spec:
+  selectAllByDefault: true
+  remoteWrite:
+    - url: http://vmsingle-default.victoria.svc:8428/api/v1/write
+  scrapeInterval: 15s
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: victoria-metrics
+  namespace: victoria
+spec:
+  allowCrossNamespaceImport: true
+  instanceSelector:
+    matchLabels:
+      dashboards: grafana
+  datasource:
+    name: prometheus
+    type: prometheus
+    access: proxy
+    url: http://vmsingle-default.victoria.svc:8429
+    isDefault: true
+    jsonData:
+      prometheusType: Prometheus
+      prometheusVersion: 2.24.0
+      timeInterval: 15s
+---
+apiVersion: operator.victoriametrics.com/v1
+kind: VLSingle
+metadata:
+  name: default
+  namespace: victoria
+spec:
+  storage:
+    storageClassName: proxmox-nvram
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: 64Gi
+---
+apiVersion: operator.victoriametrics.com/v1
+kind: VLAgent
+metadata:
+  name: default
+  namespace: kube-system
+spec:
+  k8sCollector:
+    enabled: true
+  remoteWrite:
+    - url: http://vlsingle-default.victoria.svc:9428/internal/insert
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: victoria-logs
+  namespace: victoria
+spec:
+  allowCrossNamespaceImport: true
+  instanceSelector:
+    matchLabels:
+      dashboards: grafana
+  datasource:
+    name: loki
+    type: loki
+    access: proxy
+    url: http://vlsingle-default.victoria.svc:9428
+    jsonData:
+      timeout: 60
+      maxLines: 1024

@@ -1,0 +1,7 @@
+version: v1alpha1
+machine:
+  type: controlplane
+---
+apiVersion: v1alpha1
+kind: HostnameConfig
+hostname: controller0.cluster.local

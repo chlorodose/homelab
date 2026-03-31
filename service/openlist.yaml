@@ -1,0 +1,144 @@
+---
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/basic-auth
+metadata:
+  name: openlist-database-token
+  namespace: database
+  labels:
+    cnpg.io/reload: "true"
+  annotations:
+    reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+    reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"
+    secret-generator.v1.mittwald.de/autogenerate: password
+    secret-generator.v1.mittwald.de/encoding: hex
+stringData:
+  username: openlist
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: openlist
+  namespace: database
+spec:
+  name: openlist
+  owner: openlist
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: openlist
+  namespace: database
+spec:
+  cluster:
+    name: postgres
+  name: openlist
+  login: true
+  superuser: false
+  createdb: false
+  databaseRoleReclaimPolicy: delete
+  passwordSecret:
+    name: openlist-database-token
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-openlist
+  namespace: service
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: openlist
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: openlist-expose
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - openlist.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: openlist
+          namespace: service
+          kind: Service
+          port: 5244
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: Bucket
+metadata:
+  name: openlist
+  namespace: database
+spec:
+  clusterRef:
+    name: seaweed
+  reclaimPolicy: Retain
+  adoptExisting: true
+  versioning: Off
+  objectLock: false
+  quota:
+    size: 128Gi
+    enforce: true
+  owner: openlist
+  access:
+    - user: openlist
+      actions: [Read, Write, List, Admin]
+  placement:
+    fsync: false
+    worm: false
+    readOnly: false
+  anonymousRead: false
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: S3Identity
+metadata:
+  name: openlist
+  namespace: database
+spec:
+  seaweedRef:
+    name: seaweed
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: ResourceReferenceGrant
+metadata:
+  name: allow-openlist-from-service
+  namespace: database
+spec:
+  from:
+    - group: seaweed.seaweedfs.com
+      kind: S3Credentials
+      namespace: service
+  to:
+    - group: seaweed.seaweedfs.com
+      kind: S3Identity
+      name: openlist
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: S3Credentials
+metadata:
+  name: openlist
+  namespace: service
+spec:
+  seaweedRef:
+    name: seaweed
+    namespace: database
+  identityRef:
+    name: openlist
+  secretRef:
+    name: seaweed-openlist-key
