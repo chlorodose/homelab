@@ -1,0 +1,91 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: dnsexporter
+spec:
+  url: oci://ghcr.io/chlorodose/dnsexporter-helm/charts/dnsexporter
+  ref:
+    semver: "^0.1"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: dnsexporter
+spec:
+  targetNamespace: service
+  chartRef:
+    kind: OCIRepository
+    name: dnsexporter
+  values:
+    replicaCount: 1
+    service:
+      type: LoadBalancer
+      ports:
+        - name: pdnslog
+          port: 6001
+          targetPort: 6001
+      externalIPs:
+        - 192.168.100.100
+      extraSpec:
+        allocateLoadBalancerNodePorts: false
+    dnsexporter:
+      config:
+        global:
+          server-identity: "pdnslog-translator"
+          trace:
+            verbose: true
+        pipelines:
+          - name: "pdnslog"
+            powerdns:
+              listen-ip: 0.0.0.0
+              listen-port: 6001
+              tls-support: false
+              tls-min-version: 1.2
+              cert-file: ""
+              key-file: ""
+              reset-conn: true
+              add-dns-payload: false
+            transforms:
+              order:
+                [
+                  "normalize",
+                  "suspicious",
+                  "relabeling",
+                  "latency",
+                  "frequency-filtering",
+                ]
+              normalize:
+                qname-lowercase: true
+                qname-replace-nonprintable: true
+                rr-lowercase: true
+                add-tld: true
+                add-tld-plus-one: true
+                quiet-text: false
+              suspicious:
+                threshold-qname-len: 100
+                threshold-packet-len: 1000
+                threshold-slow: 2.0
+                threshold-max-labels: 10
+              latency:
+                measure-latency: true
+                unanswered-queries: true
+                queries-timeout: 10
+              frequency-filtering:
+                enable: true
+                target: "domain"
+                threshold-heavy: 128
+                action-on-heavy: "sample"
+                sample-rate: 10
+                ttl: 300
+                max-capacity: 10240
+            routing-policy:
+              forward: ["vtlogs"]
+          - name: "vtlogs"
+            lokiclient:
+              server-url: "http://vlinsert-vlogs.database.svc:9481/insert/loki/api/v1/push"
+              job-name: "pdnslog"
+              mode: "json"
+              flush-interval: 5
+              batch-size: 1048576
+              retry-interval: 10
+              relabel-configs: []

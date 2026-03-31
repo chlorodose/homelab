@@ -1,0 +1,49 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: local-csi
+spec:
+  url: https://kubernetes-sigs.github.io/sig-storage-local-static-provisioner
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmChart
+metadata:
+  name: local-csi
+spec:
+  chart: local-static-provisioner
+  sourceRef:
+    kind: HelmRepository
+    name: local-csi
+  version: "^2.9"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: local-csi
+spec:
+  targetNamespace: kube-system
+  chartRef:
+    kind: HelmChart
+    name: local-csi
+  values:
+    setPVOwnerRef: true
+    useNodeNameOnly: true
+    classes:
+      - name: hddr-volumes
+        storageClass:
+          reclaimPolicy: Retain
+        hostDir: /dev/disk/by-scsi-serial
+        mountDir: /dev/disk/hddr-volumes
+        volumeMode: Filesystem
+        accessMode: ReadWriteOnce
+        fsType: xfs
+        namePattern: "hddr*"
+      - name: nvmb-volumes
+        storageClass:
+          reclaimPolicy: Retain
+        hostDir: /dev/disk/by-scsi-serial
+        mountDir: /dev/disk/nvmb-volumes
+        volumeMode: Filesystem
+        accessMode: ReadWriteOnce
+        fsType: xfs
+        namePattern: "nvmb*"

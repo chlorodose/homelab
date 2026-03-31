@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bootstrap-script
+  namespace: kube-system
+spec:
+  template:
+    spec:
+      serviceAccountName: bootstrap-script
+      hostNetwork: true
+      priorityClassName: system-cluster-critical
+      tolerations:
+        - operator: Exists
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      containers:
+        - name: bootstrap-script
+          image: alpine/k8s:1.32.13
+          command:
+            - "/bin/sh"
+            - "-c"
+            - |
+              set -e
+              mkdir /work && cd /work
+
+              echo "Fetching Repo" >&2
+              git clone https://github.com/chlorodose/homelab.git -b main --depth 1
+
+              echo "Running Bootstrap" >&2
+              ./homelab/bootstrap
+
+              echo "Done." >&2
+          env:
+            - name: KUBERNETES_SERVICE_HOST
+              value: "127.0.0.1"
+            - name: KUBERNETES_SERVICE_PORT
+              value: "6443"
+          resources:
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+      restartPolicy: OnFailure

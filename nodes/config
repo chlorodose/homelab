@@ -1,0 +1,28 @@
+#!/bin/sh
+set -e
+cd "$(dirname "$0")"
+source ./.env
+fail() {
+    echo "$1" >&2
+    exit 1
+}
+[ -n "${CLUSTER}" ] || fail "CLUSTER not defined"
+[ -n "${ENDPOINT}" ] || fail "ENDPOINT not defined"
+
+MANIFEST_PATCH="$(mktemp)"
+SECRETS="$(mktemp)"
+trap "rm -f $MANIFEST_PATCH $SECRETS" EXIT
+
+
+kubectl kustomize manifests |
+    yq -n '.cluster.inlineManifests.[0].name="manifests" | .cluster.inlineManifests.[0].contents = strload("/dev/stdin")' >"$MANIFEST_PATCH"
+cat manifests/talos.yaml | yq -r 'select(.metadata.name == "talos-cluster-secret") | .stringData."secrets.yaml"' >"$SECRETS"
+
+talosctl gen config --with-docs=false --with-examples=false --with-secrets "$SECRETS" \
+    --config-patch @talos/common.yaml \
+    --config-patch-control-plane @talos/controlplane.yaml \
+    --config-patch-worker @talos/worker.yaml \
+    --config-patch-control-plane @"$MANIFEST_PATCH" \
+    --config-patch @node-"$1".yaml \
+    -t "$(yq -r '.machine.type' node-"$1".yaml | head -n 1)" \
+    -o /dev/stdout --force "$CLUSTER" "$ENDPOINT"
