@@ -1,0 +1,282 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: mastodon
+spec:
+  url: https://mastodon.github.io/helm-charts/
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmChart
+metadata:
+  name: mastodon
+spec:
+  chart: mastodon
+  sourceRef:
+    kind: HelmRepository
+    name: mastodon
+  version: "^1.0"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: mastodon
+spec:
+  targetNamespace: service
+  chartRef:
+    kind: HelmChart
+    name: mastodon
+  values:
+    mastodon:
+      localDomain: chlorodose.me
+      webDomain: mastodon.chlorodose.me
+      secrets:
+        existingSecret: mastodon-keys
+      s3:
+        enabled: true
+        hostname: "garage.database.svc"
+        endpoint: "http://garage.database.svc:3900"
+        region: "garage"
+        bucket: "mastodon"
+        existingSecret: "garage-mastodon-key"
+        protocol: "https"
+        aliasHost: "mastodon-s3.chlorodose.me"
+      smtp:
+        domain: "no.mail"
+        server: smtp.no.mail
+        port: 587
+        authMethod: plain
+        username: "nobody"
+        password: "NONE"
+    postgresql:
+      hostname: "postgres-rw.database.svc"
+      port: 5432
+      database: mastodon
+      username: mastodonn
+      existingSecret: mastodon-database-token
+      preparedStatements: true
+    redis:
+      hostname: "mastodon-redis.service.svc"
+      port: 6379
+      existingSecret: mastodon-database-token
+    externalAuth:
+      oidc:
+        enabled: true
+        displayName: "kanidm"
+        uidField: preferred_username
+        issuer: https://idm.chlorodose.me/oauth2/openid/mastodon
+        redirectUri: https://mastodon.chlorodose.me/auth/auth/openid_connect/callback
+        scope: "openid,profile,email"
+        existingSecret: mastodon-sso-token
+        existingSecretKeys:
+          clientId: name
+          clientSecret: token
+        assumeEmailIsVerified: true
+    httproute:
+      enabled: false
+---
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/basic-auth
+metadata:
+  name: mastodon-database-token
+  namespace: database
+  labels:
+    cnpg.io/reload: "true"
+  annotations:
+    reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+    reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"
+    secret-generator.v1.mittwald.de/autogenerate: password
+    secret-generator.v1.mittwald.de/encoding: hex
+stringData:
+  username: mastodon
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: mastodon
+  namespace: database
+spec:
+  name: mastodon
+  owner: mastodon
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: mastodon
+  namespace: database
+spec:
+  cluster:
+    name: postgres
+  name: mastodon
+  login: true
+  superuser: false
+  createdb: false
+  databaseRoleReclaimPolicy: delete
+  passwordSecret:
+    name: mastodon-database-token
+---
+apiVersion: dragonflydb.io/v1alpha1
+kind: Dragonfly
+metadata:
+  name: mastodon-redis
+  namespace: service 
+spec:
+  replicas: 1
+  authentication:
+    passwordFromSecret:
+      name: mastodon-database-token
+      key: password
+---
+apiVersion: garage.rajsingh.info/v1alpha1
+kind: GarageBucket
+metadata:
+  name: mastodon
+  namespace: database
+spec:
+  clusterRef:
+    name: garage
+  quotas:
+    maxSize: 128Gi
+  website:
+    enabled: true
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mastodon-s3
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - "mastodon-s3.chlorodose.me"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            hostname: "mastodon.garage.database.svc"
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: "Access-Control-Allow-Origin"
+                value: "*"
+      backendRefs:
+        - name: garage
+          namespace: database 
+          kind: Service
+          port: 3902
+---
+apiVersion: garage.rajsingh.info/v1alpha1
+kind: GarageKey
+metadata:
+  name: garage-mastodon-key
+  namespace: database
+spec:
+  clusterRef:
+    name: garage
+  bucketPermissions:
+    - bucketRef: mastodon
+      read: true
+      write: true
+      owner: true
+  secretTemplate:
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-mastodon
+  namespace: service
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: mastodon-web
+    - group: ""
+      kind: Service
+      name: mastodon-streaming
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mastodon
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - mastodon.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            set:
+              - name: "X-Forwarded-Proto"
+                value: "https"
+      backendRefs:
+        - name: mastodon-web
+          namespace: service
+          kind: Service
+          port: 3000
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/streaming
+      backendRefs:
+        - name: mastodon-streaming
+          namespace: service
+          kind: Service
+          port: 4000
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mastodon-well-known
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /.well-known/webfinger
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            hostname: mastodon.chlorodose.me
+            statusCode: 302
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: "Access-Control-Allow-Origin"
+                value: "https://mastodon.chlorodose.me"
+              - name: "Content-Security-Policy"
+                value: "default-src 'none'; form-action 'none'"
+              - name: "Cache-Control"
+                value: "public"
+              - name: "X-Content-Type-Options"
+                value: "nosniff"
+ 

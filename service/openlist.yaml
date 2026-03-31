@@ -1,0 +1,112 @@
+---
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/basic-auth
+metadata:
+  name: openlist-database-token
+  namespace: database
+  labels:
+    cnpg.io/reload: "true"
+  annotations:
+    reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+    reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"
+    secret-generator.v1.mittwald.de/autogenerate: password
+    secret-generator.v1.mittwald.de/encoding: hex
+stringData:
+  username: openlist
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: openlist
+  namespace: database
+spec:
+  name: openlist
+  owner: openlist
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: openlist
+  namespace: database
+spec:
+  cluster:
+    name: postgres
+  name: openlist
+  login: true
+  superuser: false
+  createdb: false
+  databaseRoleReclaimPolicy: delete
+  passwordSecret:
+    name: openlist-database-token
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-openlist
+  namespace: service
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: openlist
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: openlist-expose
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - openlist.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: openlist
+          namespace: service
+          kind: Service
+          port: 5244
+---
+apiVersion: garage.rajsingh.info/v1alpha1
+kind: GarageBucket
+metadata:
+  name: openlist
+  namespace: database
+spec:
+  clusterRef:
+    name: garage
+  quotas:
+    maxSize: 128Gi
+---
+apiVersion: garage.rajsingh.info/v1alpha1
+kind: GarageKey
+metadata:
+  name: garage-openlist-key
+  namespace: database
+spec:
+  clusterRef:
+    name: garage
+  bucketPermissions:
+    - bucketRef: openlist
+      read: true
+      write: true
+      owner: true
+  secretTemplate:
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"

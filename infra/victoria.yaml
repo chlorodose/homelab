@@ -1,0 +1,67 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: victoria
+spec:
+  url: oci://ghcr.io/victoriametrics/helm-charts/victoria-metrics-operator
+  ref:
+    semver: "^0.66"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: victoria
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: victoria
+  targetNamespace: manager
+  values:
+    crds:
+      enabled: false
+    logLevel: error # to emit spam warning
+    operator:
+      enable_converter_ownership: true
+---
+apiVersion: operator.victoriametrics.com/v1
+kind: VLCluster
+metadata:
+  name: vlogs
+  namespace: database
+spec:
+  vlinsert:
+    replicaCount: 1
+  vlselect:
+    replicaCount: 1
+  vlstorage:
+    retentionPeriod: "24w"
+    replicaCount: 1
+    storage:
+      volumeClaimTemplate:
+        metadata:
+          name: volume
+        spec:
+          accessModes: [ "ReadWriteOnce" ]
+          storageClassName: proxmox-nvram
+          resources:
+            requests:
+              storage: 64Gi
+---
+apiVersion: operator.victoriametrics.com/v1
+kind: VLAgent
+metadata:
+  name: kube-logs-agent
+  namespace: kube-system
+spec:
+  k8sCollector:
+    enabled: true
+    decolorizeFields:
+      - _msg
+  remoteWrite:
+    - url: "http://vlinsert-vlogs.database.svc:9481/internal/insert"
+  tolerations:
+    - operator: Exists
+      key: node-role.kubernetes.io/control-plane
+      effect: NoSchedule
+    - operator: Exists
+      effect: PreferNoSchedule

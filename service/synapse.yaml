@@ -1,0 +1,298 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: synapse
+spec:
+  url: https://ananace.gitlab.io/charts
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmChart
+metadata:
+  name: synapse
+spec:
+  chart: matrix-synapse
+  sourceRef:
+    kind: HelmRepository
+    name: synapse
+  version: "^3.12"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: synapse
+spec:
+  targetNamespace: service
+  chartRef:
+    kind: HelmChart
+    name: synapse
+  values:
+    image:
+      repository: docker.io/dotwee/matrix-synapse-s3
+    signingkey:
+      job:
+        enabled: false
+      existingSecret: synapse-key
+      existingSecretKey: key
+    serverName: "chlorodose.me"
+    publicServerName: "matrix.chlorodose.me"
+    config:
+      publicBaseurl: "https://matrix.chlorodose.me"
+      enableRegistration: false
+      trustedKeyServers:
+        - server_name: matrix.org
+      useStructuredLogging: true
+    extraConfig:
+      presence:
+        enabled: true
+      allow_public_rooms_without_auth: true
+      allow_public_rooms_over_federation: true
+    extraSecrets:
+      oidc_providers:
+        - idp_id: kanidm
+          idp_name: kanidm
+          issuer: https://idm.chlorodose.me/oauth2/openid/matrix
+          client_id: matrix
+          allow_existing_users: true
+          enable_registration: true
+          client_secret: "@@SSO_TOKEN@@"
+          scopes:
+            - openid
+            - email
+            - profile
+          user_mapping_provider:
+            config:
+              localpart_template: '{{ user.name }}'
+              email_template: '{{ user.email }}'
+      media_storage_providers:
+        - module: s3_storage_provider.S3StorageProviderBackend
+          store_local: true
+          store_remote: true
+          store_synchronous: true
+          config:
+            bucket: synapse
+            endpoint_url: "http://garage.database.svc:3900"
+            access_key_id: "@@S3_KEY_ID@@"
+            secret_access_key: "@@S3_KEY_SECRET@@"
+    synapse:
+      extraVolumes:
+        - name: certs
+          secret:
+            secretName: postgres-synapse
+            defaultMode: 0400
+        - name: sso-token
+          secret:
+            secretName: synapse-sso-token
+        - name: s3-key
+          secret:
+            secretName: garage-synapse-key
+      extraVolumeMounts:
+        - name: certs
+          mountPath: /run/certs
+          readOnly: true
+        - name: sso-token
+          mountPath: /run/sso
+        - name: s3-key
+          mountPath: /run/s3
+      extraCommands:
+        - sed -i "s|@@SSO_TOKEN@@|$(cat /run/sso/token)|g" /synapse/config/conf.d/secrets.yaml
+        - sed -i "s|@@S3_KEY_ID@@|$(cat /run/s3/access-key-id)|g" /synapse/config/conf.d/secrets.yaml
+        - sed -i "s|@@S3_KEY_SECRET@@|$(cat /run/s3/secret-access-key)|g" /synapse/config/conf.d/secrets.yaml
+    postgresql:
+      enabled: false
+    externalPostgresql:
+      host: "postgres-rw.database.svc"
+      port: 5432
+      username: synapse
+      database: synapse
+      existingSecret: synapse-database-token
+      existingSecretPasswordKey: password
+    externalRedis:
+      host: "synapse-redis.service.svc"
+      port: 6379
+      existingSecret: synapse-database-token
+      existingSecretPasswordKey: password
+    redis:
+      enabled: false
+    persistence:
+      enabled: false
+    ingress:
+      enabled: false
+    serviceAccount:
+      create: true
+---
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/basic-auth
+metadata:
+  name: synapse-database-token
+  namespace: database
+  labels:
+    cnpg.io/reload: "true"
+  annotations:
+    reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+    reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"
+    secret-generator.v1.mittwald.de/autogenerate: password
+    secret-generator.v1.mittwald.de/encoding: hex
+stringData:
+  username: synapse
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: synapse
+  namespace: database
+spec:
+  name: synapse
+  owner: synapse
+  cluster:
+    name: postgres
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: synapse
+  namespace: database
+spec:
+  cluster:
+    name: postgres
+  name: synapse
+  login: true
+  superuser: false
+  createdb: false
+  databaseRoleReclaimPolicy: delete
+  passwordSecret:
+    name: synapse-database-token
+---
+apiVersion: dragonflydb.io/v1alpha1
+kind: Dragonfly
+metadata:
+  name: synapse-redis
+  namespace: service
+spec:
+  replicas: 1
+  authentication:
+    passwordFromSecret:
+      name: synapse-database-token
+      key: password
+---
+apiVersion: garage.rajsingh.info/v1alpha1
+kind: GarageBucket
+metadata:
+  name: synapse
+  namespace: database
+spec:
+  clusterRef:
+    name: garage
+  quotas:
+    maxSize: 128Gi
+---
+apiVersion: garage.rajsingh.info/v1alpha1
+kind: GarageKey
+metadata:
+  name: garage-synapse-key
+  namespace: database
+spec:
+  clusterRef:
+    name: garage
+  bucketPermissions:
+    - bucketRef: synapse
+      read: true
+      write: true
+      owner: true
+  secretTemplate:
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-synapse
+  namespace: service
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: synapse-matrix-synapse
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: synapse
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - matrix.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            set:
+              - name: "X-Forwarded-Proto"
+                value: "https"
+      backendRefs:
+        - name: synapse-matrix-synapse
+          namespace: service
+          kind: Service
+          port: 8008
+    - matches:
+        - path:
+            type: Exact
+            value: /.well-known/matrix/server
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: gateway.envoyproxy.io
+            kind: HTTPRouteFilter
+            name: synapse-well-known-server
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: HTTPRouteFilter
+metadata:
+  name: synapse-well-known-server
+  namespace: manager
+spec:
+  directResponse:
+    statusCode: 200
+    contentType: application/json
+    body:
+      type: Inline
+      inline: |
+        {
+            "m.server": "matrix.chlorodose.me:443"
+        }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: synapse-well-known
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /.well-known/matrix
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            hostname: matrix.chlorodose.me
+            statusCode: 302
