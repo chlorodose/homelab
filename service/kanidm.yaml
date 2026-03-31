@@ -1,0 +1,111 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: kanidm
+spec:
+  url: oci://ghcr.io/chlorodose/kanidm-helm-chart/charts/kanidm
+  ref:
+    semver: "^0.1"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kanidm
+spec:
+  targetNamespace: service
+  chartRef:
+    kind: OCIRepository
+    name: kanidm
+  values:
+    ingress:
+      enabled: false
+    statefulset:
+      storage:
+        volumeClaimTemplate:
+          metadata:
+            name: kanidm-database
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: "proxmox-nvram"
+            resources:
+              requests:
+                storage: 2Gi
+    kanidm:
+      domain: idm.chlorodose.me
+      tls:
+        externalCertificateSecret:
+          enabled: true
+        hosts:
+          - idm.chlorodose.me
+        secretName: idm.chlorodose.me
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: "idm.chlorodose.me"
+  namespace: manager
+spec:
+  secretName: "idm.chlorodose.me"
+  secretTemplate:
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: "service"
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: "service"
+  issuerRef:
+    name: "chlorodose.me"
+    kind: Issuer
+  commonName: "idm.chlorodose.me"
+  dnsNames:
+    - "idm.chlorodose.me"
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-kanidm
+  namespace: service
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: kanidm-https
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: kanidm
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - idm.chlorodose.me
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: kanidm-https
+          namespace: service
+          kind: Service
+          port: 8443
+
+---
+apiVersion: gateway.networking.k8s.io/v1alpha3
+kind: BackendTLSPolicy
+metadata:
+  name: kanidm-backend-tls
+  namespace: service
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: kanidm-https
+  validation:
+    wellKnownCACertificates: "System"
+    hostname: idm.chlorodose.me

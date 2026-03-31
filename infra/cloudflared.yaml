@@ -1,0 +1,86 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: cloudflared
+spec:
+  url: https://cloudflare.github.io/helm-charts
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmChart
+metadata:
+  name: cloudflared
+spec:
+  chart: cloudflare-tunnel-remote
+  sourceRef:
+    kind: HelmRepository
+    name: cloudflared
+  version: "^0.1"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cloudflared
+spec:
+  targetNamespace: external
+  chartRef:
+    kind: HelmChart
+    name: cloudflared
+  values:
+    replicaCount: 1
+    podLabels:
+      app.kubernetes.io/name: cloudflared
+  postRenderers:
+    - kustomize:
+        patches:
+          - patch: |
+              kind: Secret
+              apiVersion: v1
+              metadata:
+                name: cloudflared-cloudflare-tunnel-remote
+              type: Opaque
+              $patch: delete
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-isolation
+  namespace: external
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              gateway.envoyproxy.io/owning-gateway-name: default
+              gateway.envoyproxy.io/owning-gateway-namespace: manager
+      ports:
+        - protocol: TCP
+          port: 10080
+        - protocol: TCP
+          port: 10443
+        - protocol: UDP
+          port: 10443
+    - to: # Cloudflare
+        - ipBlock: # Tunnal v4
+            cidr: 198.41.0.0/16
+        - ipBlock: # Cloudflare API
+            cidr: 104.16.0.0/12
+        - ipBlock: # Cloudflare v6
+            cidr: 2606:4700::/32
+    - to: # Cluster DNS
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
