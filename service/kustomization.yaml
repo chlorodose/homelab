@@ -6,6 +6,7 @@ resources:
   - synapse.yaml
   # - mastodon.yaml
   - openlist.yaml
+  - litellm.yaml
   - dnsexporter.yaml
 components:
   - ../utils
