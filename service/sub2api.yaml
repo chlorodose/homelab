@@ -90,6 +90,8 @@ metadata:
   namespace: service
 spec:
   replicas: 1
+  args:
+    - "--default_lua_flags=allow-undeclared-keys"
   authentication:
     passwordFromSecret:
       name: sub2api-redis-token
