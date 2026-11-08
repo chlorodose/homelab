@@ -459,6 +459,7 @@ spec:
       kind: Service
       name: sub2api
 ---
+# Keep the original route available while clients move to the new domain.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -468,7 +469,7 @@ spec:
   parentRefs:
     - name: default
   hostnames:
-    - sub2api.chlorodose.me
+    - sub2api.lilith-aster.me
   rules:
     - matches:
         - path:

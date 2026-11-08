@@ -20,6 +20,8 @@ spec:
     ingress:
       enabled: false
     statefulset:
+      image:
+        tag: "latest@sha256:7c3d7ed868e91f78c24a7fb9c548876563b375a4203021b730d58369b97ad154"
       storage:
         volumeClaimTemplate:
           metadata:
@@ -31,21 +33,21 @@ spec:
               requests:
                 storage: 2Gi
     kanidm:
-      domain: idm.chlorodose.me
+      domain: idm.lilith-aster.me
       tls:
         externalCertificateSecret:
           enabled: true
         hosts:
-          - idm.chlorodose.me
-        secretName: idm.chlorodose.me
+          - idm.lilith-aster.me
+        secretName: idm.lilith-aster.me
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: "idm.chlorodose.me"
+  name: "idm.lilith-aster.me"
   namespace: manager
 spec:
-  secretName: "idm.chlorodose.me"
+  secretName: "idm.lilith-aster.me"
   secretTemplate:
     annotations:
       reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
@@ -55,9 +57,8 @@ spec:
   issuerRef:
     name: "chlorodose.me"
     kind: Issuer
-  commonName: "idm.chlorodose.me"
   dnsNames:
-    - "idm.chlorodose.me"
+    - "idm.lilith-aster.me"
 ---
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: ReferenceGrant
@@ -83,7 +84,7 @@ spec:
   parentRefs:
     - name: default
   hostnames:
-    - idm.chlorodose.me
+    - idm.lilith-aster.me
   rules:
     - matches:
         - path:
@@ -108,4 +109,4 @@ spec:
       name: kanidm-https
   validation:
     wellKnownCACertificates: "System"
-    hostname: idm.chlorodose.me
+    hostname: idm.lilith-aster.me

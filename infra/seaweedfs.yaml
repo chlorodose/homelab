@@ -238,7 +238,7 @@ spec:
   parentRefs:
     - name: default
   hostnames:
-    - s3.chlorodose.me
+    - s3.lilith-aster.me
   rules:
     - matches:
         - path:

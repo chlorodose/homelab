@@ -1,0 +1,15 @@
+# Retained migration source volume; the temporary server has been retired.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kanidm-lilith-data
+  namespace: service
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: proxmox-nvram
+  resources:
+    requests:
+      storage: 2Gi

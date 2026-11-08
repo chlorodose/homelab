@@ -28,9 +28,21 @@ spec:
   values:
     image:
       tag: "1.37.1" # FIXME: workaound as upstream chart is not updated
+    # Keep overlapping rollout pods on the same node for the RWO data volume.
+    affinity:
+      podAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: vaultwarden
+                app.kubernetes.io/instance: vaultwarden
+              matchExpressions:
+                - key: pod-template-hash
+                  operator: Exists
     vaultwarden:
       allowSignups: false
-      domain: "https://vaultwarden.chlorodose.me"
+      domain: "https://vaultwarden.lilith-aster.me"
       admin:
         enabled: true
         existingSecret: vaultwarden-admin-token
@@ -40,7 +52,7 @@ spec:
         authOnlyNotSession: true
         existingSecret: vaultwarden-sso-token
         allowUnknownEmailVerification: true
-        authority: "https://idm.chlorodose.me/oauth2/openid/vaultwarden"
+        authority: "https://idm.lilith-aster.me/oauth2/openid/vaultwarden"
       extraEnv:
         # DATA_FOLDER: s3://vaultwarden/
         # RSA_KEY_FILENAME: s3://vaultwarden/rsa_key
@@ -146,45 +158,14 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: vaultwarden
-  namespace: manager
-spec:
-  parentRefs:
-    - name: default
-  hostnames:
-    - vaultwarden.internal.chlorodose.me
-  rules:
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /
-      backendRefs:
-        - name: vaultwarden
-          namespace: service
-          kind: Service
-          port: 80
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
   name: vaultwarden-expose
   namespace: manager
 spec:
   parentRefs:
     - name: default
   hostnames:
-    - vaultwarden.chlorodose.me
+    - vaultwarden.lilith-aster.me
   rules:
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /admin
-      filters:
-        - type: ExtensionRef
-          extensionRef:
-            group: gateway.envoyproxy.io
-            kind: HTTPRouteFilter
-            name: forbidden-403
     - matches:
         - path:
             type: PathPrefix
