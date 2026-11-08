@@ -94,6 +94,7 @@ spec:
         mode: Terminate
         certificateRefs:
           - name: chlorodose.me
+          - name: lilith-aster.me
     - name: postgres
       protocol: TCP
       port: 5432
@@ -119,6 +120,20 @@ spec:
     - "chlorodose.me"
     - "*.chlorodose.me"
     - "*.internal.chlorodose.me"
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: "lilith-aster.me"
+  namespace: manager
+spec:
+  secretName: "lilith-aster.me"
+  issuerRef:
+    name: "chlorodose.me"
+    kind: Issuer
+  dnsNames:
+    - "lilith-aster.me"
+    - "*.lilith-aster.me"
 ---
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: HTTPRouteFilter
