@@ -27,7 +27,7 @@ spec:
     name: vaultwarden
   values:
     image:
-      tag: "1.37.1" # FIXME: workaound as upstream chart is not updated
+      tag: "1.37.5" # Override the older app version bundled with the chart.
     # Keep overlapping rollout pods on the same node for the RWO data volume.
     affinity:
       podAffinity:
