@@ -95,7 +95,7 @@ spec:
   versioning: Off
   objectLock: false
   quota:
-    size: 128Gi
+    size: 1Ti
     enforce: true
   owner: openlist
   access:
