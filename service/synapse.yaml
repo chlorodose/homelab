@@ -42,28 +42,19 @@ spec:
         - server_name: matrix.org
       useStructuredLogging: true
     extraConfig:
+      matrix_authentication_service:
+        enabled: true
+        endpoint: http://mas.service.svc:8080/
+        secret_path: /run/mas/matrix-secret
+      password_config:
+        enabled: false
+      enable_3pid_changes: false
       presence:
         enabled: true
       allow_public_rooms_without_auth: true
       allow_public_rooms_over_federation: true
     extraSecrets:
-      oidc_providers:
-        - idp_id: kanidm
-          idp_name: kanidm
-          issuer: https://idm.lilith-aster.me/oauth2/openid/matrix
-          client_id: matrix
-          allow_existing_users: true
-          enable_registration: true
-          client_secret: "@@SSO_TOKEN@@"
-          scopes:
-            - openid
-            - email
-            - profile
-          user_mapping_provider:
-            config:
-              localpart_template: "{{ user.preferred_username.split('@')[0] }}"
-              display_name_template: "{{ user.name }}"
-              email_template: "{{ user.email }}"
+      oidc_providers: []
       media_storage_providers:
         - module: s3_storage_provider.S3StorageProviderBackend
           store_local: true
@@ -80,9 +71,12 @@ spec:
           secret:
             secretName: postgres-synapse
             defaultMode: 0400
-        - name: sso-token
+        - name: mas-key
           secret:
-            secretName: synapse-sso-token
+            secretName: mas-keys
+            items:
+              - key: matrix-secret
+                path: matrix-secret
         - name: s3-key
           secret:
             secretName: seaweed-synapse-key
@@ -90,12 +84,12 @@ spec:
         - name: certs
           mountPath: /run/certs
           readOnly: true
-        - name: sso-token
-          mountPath: /run/sso
+        - name: mas-key
+          mountPath: /run/mas
+          readOnly: true
         - name: s3-key
           mountPath: /run/s3
       extraCommands:
-        - sed -i "s|@@SSO_TOKEN@@|$(cat /run/sso/token)|g" /synapse/config/conf.d/secrets.yaml
         - sed -i "s|@@S3_KEY_ID@@|$(cat /run/s3/accessKey)|g" /synapse/config/conf.d/secrets.yaml
         - sed -i "s|@@S3_KEY_SECRET@@|$(cat /run/s3/secretKey)|g" /synapse/config/conf.d/secrets.yaml
     postgresql:
@@ -269,13 +263,34 @@ spec:
   hostnames:
     - matrix.lilith-aster.me
   rules:
+    # Authentication compatibility endpoints take precedence over /_matrix.
+    - matches:
+        - path:
+            type: RegularExpression
+            value: ^/_matrix/client/[^/]+/(login|logout|refresh)(/.*)?$
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            set:
+              - name: X-Forwarded-Proto
+                value: https
+      backendRefs:
+        - name: mas
+          namespace: service
+          port: 8080
     - timeouts:
         request: 120s
         backendRequest: 120s
       matches:
         - path:
             type: PathPrefix
-            value: /
+            value: /_matrix
+        - path:
+            type: PathPrefix
+            value: /_synapse/client
+        - path:
+            type: Exact
+            value: /.well-known/matrix/client
       filters:
         - type: RequestHeaderModifier
           requestHeaderModifier:
@@ -287,6 +302,20 @@ spec:
           namespace: service
           kind: Service
           port: 8008
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            set:
+              - name: X-Forwarded-Proto
+                value: https
+      backendRefs:
+        - name: mas
+          namespace: service
+          port: 8080
     - matches:
         - path:
             type: Exact

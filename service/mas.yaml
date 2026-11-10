@@ -1,0 +1,291 @@
+# MAS keys are provisioned separately through secrets/kustomization.yaml.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mas-database-token
+  namespace: database
+  labels:
+    cnpg.io/reload: 'true'
+  annotations:
+    reflector.v1.k8s.emberstack.com/reflection-allowed: 'true'
+    reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: service
+    reflector.v1.k8s.emberstack.com/reflection-auto-enabled: 'true'
+    reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: service
+    secret-generator.v1.mittwald.de/autogenerate: password
+    secret-generator.v1.mittwald.de/encoding: hex
+type: kubernetes.io/basic-auth
+stringData:
+  username: mas
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: DatabaseRole
+metadata:
+  name: mas
+  namespace: database
+spec:
+  cluster:
+    name: postgres
+  name: mas
+  login: true
+  superuser: false
+  createdb: false
+  databaseRoleReclaimPolicy: retain
+  passwordSecret:
+    name: mas-database-token
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: mas
+  namespace: database
+spec:
+  name: mas
+  owner: mas
+  cluster:
+    name: postgres
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-mas
+  namespace: database
+spec:
+  secretName: postgres-mas
+  commonName: mas
+  usages:
+  - client auth
+  issuerRef:
+    name: db-ca
+    kind: Issuer
+  secretTemplate:
+    labels:
+      cnpg.io/reload: 'true'
+    annotations:
+      reflector.v1.k8s.emberstack.com/reflection-allowed: 'true'
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: service
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: 'true'
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: service
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mas-config
+  namespace: service
+data:
+  config.yaml: |
+    http:
+      public_base: https://matrix.lilith-aster.me/
+      issuer: https://matrix.lilith-aster.me/
+      listeners:
+      - name: web
+        resources:
+        - name: discovery
+        - name: human
+        - name: oauth
+        - name: compat
+        - name: graphql
+        - name: assets
+        binds:
+        - address: '[::]:8080'
+      - name: internal
+        resources:
+        - name: health
+        binds:
+        - address: '[::]:8081'
+    database:
+      host: postgres-rw.database.svc
+      port: 5432
+      username: mas
+      database: mas
+      password_file: /run/database/password
+      ssl_mode: verify-full
+      max_connections: 10
+      ssl_ca_file: /run/certs/ca.crt
+      ssl_certificate_file: /run/certs/tls.crt
+      ssl_key_file: /run/certs/tls.key
+    matrix:
+      kind: synapse
+      homeserver: lilith-aster.me
+      endpoint: http://synapse-matrix-synapse.service.svc:8008
+      secret_file: /run/keys/matrix-secret
+    secrets:
+      encryption_file: /run/keys/encryption
+      keys:
+      - key_file: /run/keys/signing-key-0.pem
+      - key_file: /run/keys/signing-key-1.pem
+      - key_file: /run/keys/signing-key-2.pem
+      - key_file: /run/keys/signing-key-3.pem
+    passwords:
+      enabled: true
+      schemes:
+      - version: 1
+        algorithm: bcrypt
+        unicode_normalization: true
+      - version: 2
+        algorithm: argon2id
+      minimum_complexity: 3
+    account:
+      password_registration_enabled: false
+      password_recovery_enabled: false
+      email_change_allowed: false
+    email:
+      from: '"Matrix" <matrix@lilith-aster.me>'
+      transport: blackhole
+    branding:
+      service_name: Lilith Matrix
+    upstream_oauth2:
+      providers:
+      - id: 01M72R4X5TYSQDZ7A3VD0NMVT5
+        synapse_idp_id: oidc-kanidm
+        human_name: Kanidm
+        issuer: https://idm.lilith-aster.me/oauth2/openid/matrix
+        client_id: matrix
+        client_secret_file: /run/sso/token
+        token_endpoint_auth_method: client_secret_basic
+        id_token_signed_response_alg: ES256
+        scope: openid email profile
+        pkce_method: always
+        claims_imports:
+          localpart:
+            action: require
+            template: '{{ user.preferred_username.split(''@'')[0] }}'
+            on_conflict: fail
+          displayname:
+            action: force
+            template: '{{ user.name }}'
+          email:
+            action: force
+            template: '{{ user.email }}'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mas
+  namespace: service
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mas
+  template:
+    metadata:
+      labels:
+        app: mas
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: mas
+        image: ghcr.io/element-hq/matrix-authentication-service:1.28.0@sha256:494c67f08ee8344368f4ed336611dea02b26c4e058bf37a212d090d50b612659
+        args:
+        - server
+        - --config
+        - /etc/mas/config.yaml
+        ports:
+        - name: http
+          containerPort: 8080
+        - name: health
+          containerPort: 8081
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: '2'
+            memory: 512Mi
+        startupProbe:
+          httpGet:
+            path: /health
+            port: health
+          periodSeconds: 2
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: health
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: health
+        volumeMounts:
+        - name: config
+          mountPath: /etc/mas
+          readOnly: true
+        - name: keys
+          mountPath: /run/keys
+          readOnly: true
+        - name: database
+          mountPath: /run/database
+          readOnly: true
+        - name: sso
+          mountPath: /run/sso
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        - name: certs
+          mountPath: /run/certs
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: mas-config
+      - name: keys
+        secret:
+          secretName: mas-keys
+          defaultMode: 288
+      - name: database
+        secret:
+          secretName: mas-database-token
+          defaultMode: 288
+      - name: sso
+        secret:
+          secretName: synapse-sso-token
+          defaultMode: 288
+      - name: tmp
+        emptyDir: {}
+      - name: certs
+        secret:
+          secretName: postgres-mas
+          defaultMode: 288
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mas
+  namespace: service
+spec:
+  selector:
+    app: mas
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-mas
+  namespace: service
+spec:
+  from:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    namespace: manager
+  to:
+  - group: ''
+    kind: Service
+    name: mas

@@ -5,6 +5,7 @@ resources:
   - kanidm.yaml
   - kanidm-lilith.yaml
   - synapse.yaml
+  - mas.yaml
   # - mastodon.yaml
   - openlist.yaml
   - dnsexporter.yaml
