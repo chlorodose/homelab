@@ -289,6 +289,9 @@ spec:
             type: PathPrefix
             value: /_synapse/client
         - path:
+            type: PathPrefix
+            value: /_synapse/admin
+        - path:
             type: Exact
             value: /.well-known/matrix/client
       filters:
