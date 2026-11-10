@@ -22,7 +22,7 @@ spec:
       rbacProxyMetricsReader:
         create: true
         serviceAccountName: vmagent-monitoring-victoria-metrics-k8s-stack
-        serviceAccountNamespace: manager
+        serviceAccountNamespace: kube-system
     grafanaDashboard:
       enabled: true
     crds:

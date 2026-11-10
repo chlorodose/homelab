@@ -33,6 +33,7 @@ spec:
             requests:
               storage: 32Gi
     vmagent:
+      namespaceOverride: kube-system
       spec:
         selectAllByDefault: true
         scrapeInterval: 30s
@@ -91,6 +92,7 @@ spec:
     kubeProxy:
       enabled: false
     prometheus-node-exporter:
+      namespaceOverride: kube-system
       hostRootFsMount:
         mountPropagation: HostToContainer
       extraArgs:
