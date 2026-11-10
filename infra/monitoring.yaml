@@ -73,21 +73,22 @@ spec:
               relabelConfigs:
                 - targetLabel: __address__
                   replacement: 127.0.0.1:10259
-    kubeEtcd:
-      service:
-        # Talos runs etcd outside Kubernetes; use a control-plane pod for discovery.
-        selector:
-          component: kube-apiserver
-        port: 2381
-        targetPort: 2381
+    kubeApiServer:
       vmScrape:
         spec:
           endpoints:
-            - port: http-metrics
-              scheme: http
-              relabelConfigs:
-                - targetLabel: __address__
-                  replacement: 127.0.0.1:2381
+            - port: https
+              scheme: https
+              bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+              tlsConfig:
+                caFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                serverName: kubernetes
+              # This cluster's API server metrics exceed the default 16 MiB cap.
+              max_scrape_size: 64MiB
+    # Talos etcd has no separate metrics listener enabled. Keep it disabled
+    # until a listener or a dedicated client certificate is provisioned.
+    kubeEtcd:
+      enabled: false
     # Cilium replaces kube-proxy.
     kubeProxy:
       enabled: false
