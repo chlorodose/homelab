@@ -17,6 +17,19 @@ spec:
     kind: OCIRepository
     name: cilium
   values:
+    prometheus:
+      enabled: true
+      serviceMonitor:
+        enabled: true
+    dashboards:
+      enabled: true
+    operator:
+      prometheus:
+        enabled: true
+        serviceMonitor:
+          enabled: true
+      dashboards:
+        enabled: true
     upgradeCompatibility: "1.19"
     kubeProxyReplacement: true
     k8sServiceHost: localhost
@@ -28,10 +41,20 @@ spec:
     ipam:
       mode: kubernetes
     hubble:
+      metrics:
+        enabled: [dns, drop, tcp, flow, icmp, httpV2]
+        serviceMonitor:
+          enabled: true
+        dashboards:
+          enabled: true
       ui:
         enabled: true
       relay:
         enabled: true
+        prometheus:
+          enabled: true
+          serviceMonitor:
+            enabled: true
     k8sClientRateLimit:
       qps: 32
       burst: 128

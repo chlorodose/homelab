@@ -26,6 +26,8 @@ spec:
     kind: HelmChart
     name: local-csi
   values:
+    serviceMonitor:
+      enabled: true
     setPVOwnerRef: true
     useNodeNameOnly: true
     classes:

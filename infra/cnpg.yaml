@@ -17,6 +17,10 @@ spec:
     kind: OCIRepository
     name: cnpg
   values:
+    monitoring:
+      podMonitorEnabled: true
+      grafanaDashboard:
+        create: true
     crds:
       create: false
 ---
@@ -50,6 +54,8 @@ metadata:
   name: postgres
   namespace: database
 spec:
+  monitoring:
+    enablePodMonitor: true
   instances: 3
   storage:
     size: 120Gi

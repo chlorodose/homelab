@@ -17,5 +17,13 @@ spec:
     kind: OCIRepository
     name: redis
   values:
+    serviceMonitor:
+      enabled: true
+      rbacProxyMetricsReader:
+        create: true
+        serviceAccountName: vmagent-monitoring-victoria-metrics-k8s-stack
+        serviceAccountNamespace: manager
+    grafanaDashboard:
+      enabled: true
     crds:
       install: false

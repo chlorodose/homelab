@@ -1,0 +1,218 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: monitoring
+spec:
+  url: oci://ghcr.io/victoriametrics/helm-charts/victoria-metrics-k8s-stack
+  ref:
+    semver: "~0.98.1"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: monitoring
+spec:
+  targetNamespace: manager
+  dependsOn:
+    - name: victoria
+    - name: prometheus-crds
+  chartRef:
+    kind: OCIRepository
+    name: monitoring
+  values:
+    # The existing operator also manages VictoriaLogs; do not install a second one.
+    victoria-metrics-operator:
+      enabled: false
+    vmsingle:
+      spec:
+        retentionPeriod: "12"
+        storage:
+          storageClassName: proxmox-nvram
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 32Gi
+    vmagent:
+      spec:
+        selectAllByDefault: true
+        scrapeInterval: 30s
+        externalLabels:
+          cluster: homelab
+        # Talos control-plane metrics bind to loopback. There is one control-plane
+        # node in this cluster; collect locally without changing its listeners.
+        hostNetwork: true
+        dnsPolicy: ClusterFirstWithHostNet
+        nodeSelector:
+          kubernetes.io/hostname: controller0
+        tolerations:
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+            effect: NoSchedule
+    kubeControllerManager:
+      vmScrape:
+        spec:
+          endpoints:
+            - port: http-metrics
+              scheme: https
+              bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+              tlsConfig:
+                insecureSkipVerify: true
+              relabelConfigs:
+                - targetLabel: __address__
+                  replacement: 127.0.0.1:10257
+    kubeScheduler:
+      vmScrape:
+        spec:
+          endpoints:
+            - port: http-metrics
+              scheme: https
+              bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+              tlsConfig:
+                insecureSkipVerify: true
+              relabelConfigs:
+                - targetLabel: __address__
+                  replacement: 127.0.0.1:10259
+    kubeEtcd:
+      service:
+        # Talos runs etcd outside Kubernetes; use a control-plane pod for discovery.
+        selector:
+          component: kube-apiserver
+        port: 2381
+        targetPort: 2381
+      vmScrape:
+        spec:
+          endpoints:
+            - port: http-metrics
+              scheme: http
+              relabelConfigs:
+                - targetLabel: __address__
+                  replacement: 127.0.0.1:2381
+    # Cilium replaces kube-proxy.
+    kubeProxy:
+      enabled: false
+    prometheus-node-exporter:
+      hostRootFsMount:
+        mountPropagation: HostToContainer
+      extraArgs:
+        - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/kubelet/.+|var/lib/containerd/.+)($|/)
+        - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|mqueue|nsfs|overlay|proc|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$
+      prometheus:
+        monitor:
+          enabled: true
+          jobLabel: jobLabel
+          relabelings:
+            - sourceLabels: [__meta_kubernetes_pod_node_name]
+              targetLabel: node
+      vmScrape:
+        enabled: false
+    kube-state-metrics:
+      prometheus:
+        monitor:
+          enabled: true
+          jobLabel: app.kubernetes.io/name
+          honorLabels: true
+      vmScrape:
+        enabled: false
+    # Keep the chart's recording rules: Kubernetes dashboards depend on them.
+    vmalert:
+      enabled: true
+    grafana:
+      grafana.ini:
+        date_formats:
+          default_timezone: Asia/Shanghai
+      deploymentStrategy:
+        type: Recreate
+      persistence:
+        enabled: true
+        storageClassName: proxmox-nvram
+        size: 4Gi
+      sidecar:
+        dashboards:
+          searchNamespace: ALL
+          # Dragonfly labels dashboards with their name rather than "1".
+          labelValue: ""
+      route:
+        main:
+          enabled: true
+          hostnames:
+            - grafana.internal.chlorodose.me
+          parentRefs:
+            - name: default
+      # The chart generates a random admin password in monitoring-grafana.
+    defaultDatasources:
+      victoriametrics:
+        datasources:
+          - name: Prometheus
+            type: prometheus
+            uid: prometheus
+            access: proxy
+            isDefault: true
+            jsonData:
+              timeInterval: 30s
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: prometheus-adapter
+spec:
+  url: oci://ghcr.io/prometheus-community/charts/prometheus-adapter
+  ref:
+    semver: "~5.4.0"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: prometheus-adapter
+spec:
+  targetNamespace: manager
+  dependsOn:
+    - name: monitoring
+  chartRef:
+    kind: OCIRepository
+    name: prometheus-adapter
+  values:
+    prometheus:
+      url: http://vmsingle-monitoring-victoria-metrics-k8s-stack.manager.svc
+      port: 8428
+    # Serve metrics.k8s.io from the same metrics already collected by vmagent.
+    rules:
+      default: false
+      resource:
+        cpu:
+          containerQuery: |
+            sum by (<<.GroupBy>>) (
+              rate(container_cpu_usage_seconds_total{container!="",container!="POD",<<.LabelMatchers>>}[2m])
+            )
+          nodeQuery: |
+            sum by (<<.GroupBy>>) (
+              rate(node_cpu_seconds_total{job="node-exporter",mode!="idle",mode!="iowait",mode!="steal",<<.LabelMatchers>>}[2m])
+            )
+          resources:
+            overrides:
+              node:
+                resource: node
+              namespace:
+                resource: namespace
+              pod:
+                resource: pod
+          containerLabel: container
+        memory:
+          containerQuery: |
+            sum by (<<.GroupBy>>) (
+              container_memory_working_set_bytes{container!="",container!="POD",<<.LabelMatchers>>}
+            )
+          nodeQuery: |
+            sum by (<<.GroupBy>>) (
+              node_memory_MemTotal_bytes{job="node-exporter",<<.LabelMatchers>>}
+              - node_memory_MemAvailable_bytes{job="node-exporter",<<.LabelMatchers>>}
+            )
+          resources:
+            overrides:
+              node:
+                resource: node
+              namespace:
+                resource: namespace
+              pod:
+                resource: pod
+          containerLabel: container
+        window: 2m

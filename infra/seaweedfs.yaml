@@ -26,6 +26,10 @@ spec:
     kind: HelmChart
     name: seaweedfs
   values:
+    serviceMonitor:
+      enabled: true
+    grafanaDashboard:
+      enabled: true
     crds:
       create: false
     csiDriver:

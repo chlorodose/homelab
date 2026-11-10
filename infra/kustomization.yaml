@@ -13,6 +13,7 @@ resources:
   - redis.yaml
   - secret-generator.yaml
   - victoria.yaml
+  - monitoring.yaml
   - local-csi.yaml
   - seaweedfs.yaml
 patches:

@@ -17,5 +17,11 @@ spec:
     kind: OCIRepository
     name: spegel
   values:
+    serviceMonitor:
+      enabled: true
+    grafanaDashboard:
+      enabled: true
+      labels:
+        grafana_dashboard: "1"
     spegel:
       containerdRegistryConfigPath: /etc/cri/conf.d/hosts

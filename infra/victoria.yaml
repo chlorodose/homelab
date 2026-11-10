@@ -21,7 +21,11 @@ spec:
       enabled: false
     logLevel: error # to emit spam warning
     operator:
+      disable_prometheus_converter: false
       enable_converter_ownership: true
+    serviceMonitor:
+      enabled: true
+      vm: false
 ---
 apiVersion: operator.victoriametrics.com/v1
 kind: VLCluster
