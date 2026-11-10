@@ -249,7 +249,7 @@ metadata:
   namespace: manager
 spec:
   ca:
-    # Bootstrapped from kube-system/talos-cluster-secret outside Git.
+    # Synced from Talos by the manual kube-system/etcd-metrics-ca-sync job.
     secretName: etcd-metrics-ca
 ---
 apiVersion: cert-manager.io/v1

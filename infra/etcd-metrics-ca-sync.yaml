@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: etcd-metrics-ca-sync
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: etcd-metrics-ca-sync
+  namespace: manager
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [etcd-metrics-ca]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: etcd-metrics-ca-sync
+  namespace: manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: etcd-metrics-ca-sync
+subjects:
+  - kind: ServiceAccount
+    name: etcd-metrics-ca-sync
+    namespace: kube-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-metrics-ca-sync
+  namespace: kube-system
+spec:
+  # Manual template only:
+  # kubectl create job -n kube-system --from=cronjob/etcd-metrics-ca-sync etcd-metrics-ca-sync-$(date +%s)
+  suspend: true
+  schedule: "0 0 1 1 *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 180
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: etcd-metrics-ca-sync
+        spec:
+          serviceAccountName: etcd-metrics-ca-sync
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: extract-ca
+              image: docker.io/mikefarah/yq:4.54.1
+              command: [/bin/sh, -ec]
+              args:
+                - |
+                  umask 077
+                  if ! yq -e '.certs.etcd.crt != null and .certs.etcd.key != null and .certs.etcd.crt != "" and .certs.etcd.key != ""' /source/secrets.yaml >/dev/null 2>&1; then
+                    echo 'Missing or invalid etcd CA in talos-cluster-secret/secrets.yaml' >&2
+                    exit 1
+                  fi
+                  # Talos stores both values as base64; Secret.data accepts them directly.
+                  yq -o=json '.certs.etcd | {"data": {"tls.crt": .crt, "tls.key": .key}}' /source/secrets.yaml > /work/patch.json
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 64Mi
+              volumeMounts:
+                - name: source
+                  mountPath: /source
+                  readOnly: true
+                - name: work
+                  mountPath: /work
+          containers:
+            - name: sync-ca
+              image: registry.k8s.io/kubectl:v1.35.0
+              command: [kubectl]
+              args:
+                - --cache-dir=/work/cache
+                - --namespace=manager
+                - patch
+                - secret
+                - etcd-metrics-ca
+                - --type=merge
+                - --patch-file=/work/patch.json
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+          volumes:
+            - name: source
+              secret:
+                secretName: talos-cluster-secret
+                defaultMode: 0440
+                items:
+                  - key: secrets.yaml
+                    path: secrets.yaml
+            - name: work
+              emptyDir:
+                medium: Memory
+                sizeLimit: 16Mi
