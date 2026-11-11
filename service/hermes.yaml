@@ -1,0 +1,385 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hermes-tasks
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.35
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: hermes-tasks
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hermes-task-runner
+  namespace: hermes-tasks
+rules:
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  - cronjobs
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - secrets
+  - configmaps
+  - services
+  - endpoints
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ''
+  resources:
+  - pods/exec
+  - pods/portforward
+  verbs:
+  - create
+- apiGroups:
+  - ''
+  resources:
+  - events
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hermes-task-runner
+  namespace: hermes-tasks
+subjects:
+- kind: ServiceAccount
+  name: hermes
+  namespace: service
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hermes-task-runner
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: hermes-tasks
+  namespace: hermes-tasks
+spec:
+  hard:
+    pods: '8'
+    count/jobs.batch: '16'
+    count/cronjobs.batch: '4'
+    requests.cpu: '4'
+    requests.memory: 8Gi
+    limits.cpu: '8'
+    limits.memory: 16Gi
+    persistentvolumeclaims: '0'
+    services: '16'
+    secrets: '32'
+    count/configmaps: '32'
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: hermes-tasks
+  namespace: hermes-tasks
+spec:
+  limits:
+  - type: Container
+    defaultRequest:
+      cpu: 100m
+      memory: 128Mi
+    default:
+      cpu: '1'
+      memory: 1Gi
+    max:
+      cpu: '4'
+      memory: 8Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: task-isolation
+  namespace: hermes-tasks
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector: {}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: service
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/instance: hermes
+          app.kubernetes.io/name: hermes-agent
+  egress:
+  - to:
+    - podSelector: {}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: service
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/instance: hermes
+          app.kubernetes.io/name: hermes-agent
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 127.0.0.0/8
+        - 100.64.0.0/10
+        - 224.0.0.0/4
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: manager
+      podSelector:
+        matchLabels:
+          gateway.envoyproxy.io/owning-gateway-name: default
+          gateway.envoyproxy.io/owning-gateway-namespace: manager
+    ports:
+    - protocol: TCP
+      port: 10080
+    - protocol: TCP
+      port: 10443
+    - protocol: UDP
+      port: 10443
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-launcher
+  namespace: service
+data:
+  launch.py: |
+    import hashlib
+    import os
+    from pathlib import Path
+    import time
+    import urllib.request
+
+    home = Path(os.environ["HERMES_HOME"])
+    secret = Path("/credentials")
+    def read(key):
+        path = secret / key
+        return path.read_text().strip() if path.exists() else ""
+
+    # The projected Secret refreshes in-place; never log credential values.
+    required = ("MATRIX_HOMESERVER", "MATRIX_USER_ID", "MATRIX_ACCESS_TOKEN")
+    while True:
+        missing = [key for key in required if not read(key)]
+        if not missing:
+            break
+        print("Waiting for hermes-credentials fields: " + ", ".join(missing), flush=True)
+        time.sleep(30)
+
+    # config.yaml and SOUL.md are user-managed on the persistent volume.
+    # Only provide credential values; never rewrite model/provider settings here.
+    api_key = read("API_KEY")
+    if api_key:
+        os.environ["HERMES_API_KEY"] = api_key
+    for key in ("MATRIX_HOMESERVER", "MATRIX_USER_ID", "MATRIX_ACCESS_TOKEN"):
+        os.environ[key] = read(key)
+
+    # Install a version-pinned kubectl with the release checksum, without root.
+    bin_dir = home / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    binary = bin_dir / "kubectl"
+    if not binary.exists():
+        url = "https://dl.k8s.io/release/v1.35.0/bin/linux/amd64/kubectl"
+        with urllib.request.urlopen(url + ".sha256", timeout=60) as response:
+            digest = response.read().decode().strip()
+        with urllib.request.urlopen(url, timeout=120) as response:
+            data = response.read()
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise SystemExit("kubectl checksum mismatch")
+        tmp = bin_dir / "kubectl.download"
+        tmp.write_bytes(data)
+        tmp.chmod(0o755)
+        tmp.replace(binary)
+    os.environ["PATH"] = str(bin_dir) + ":" + os.environ["PATH"]
+    print("Credentials configured; starting Hermes Matrix gateway.", flush=True)
+    os.execv("/opt/hermes/docker/entrypoint-dispatch.sh", ["entrypoint-dispatch.sh", "gateway", "run"])
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: hermes
+spec:
+  url: https://jyje.github.io/hermes-agent-helm
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmChart
+metadata:
+  name: hermes
+spec:
+  chart: hermes-agent
+  version: 1.23.0
+  sourceRef:
+    kind: HelmRepository
+    name: hermes
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: hermes
+spec:
+  targetNamespace: service
+  chartRef:
+    kind: HelmChart
+    name: hermes
+  values:
+    fullnameOverride: hermes
+    image:
+      tag: v0.22.5
+    env: {}
+    serviceAccount:
+      create: true
+      name: hermes
+      automountServiceAccountToken: true
+    persistence:
+      enabled: true
+      storageClass: proxmox-nvram
+      size: 10Gi
+    bootstrap:
+      enabled: true
+      overwrite: false
+    config:
+      model:
+        provider: homelab
+        default: default-model
+      terminal:
+        backend: local
+      agent:
+        gateway_timeout: 1800
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 10000
+      runAsGroup: 10000
+      fsGroup: 10000
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+    command:
+    - /opt/hermes/.venv/bin/python
+    - /bootstrap/launch.py
+    args: []
+    extraEnv:
+    - name: MATRIX_ALLOWED_USERS
+      value: '@lilith:lilith-aster.me'
+    - name: HERMES_TASK_NAMESPACE
+      value: hermes-tasks
+    - name: HERMES_DASHBOARD_BASIC_AUTH_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: hermes-credentials
+          key: DASHBOARD_USERNAME
+    - name: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: hermes-credentials
+          key: DASHBOARD_PASSWORD
+    extraVolumes:
+    - name: run
+      emptyDir:
+        medium: Memory
+        sizeLimit: 32Mi
+    - name: tmp
+      emptyDir:
+        sizeLimit: 1Gi
+    - name: credentials
+      secret:
+        secretName: hermes-credentials
+        defaultMode: 288
+    - name: launcher
+      configMap:
+        name: hermes-launcher
+    extraVolumeMounts:
+    - name: run
+      mountPath: /run
+    - name: tmp
+      mountPath: /tmp
+    - name: credentials
+      mountPath: /credentials
+      readOnly: true
+    - name: launcher
+      mountPath: /bootstrap
+      readOnly: true
+    resources:
+      requests:
+        cpu: 250m
+        memory: 1Gi
+      limits:
+        cpu: '2'
+        memory: 4Gi
+    tests:
+      enabled: false
+    soul:
+      text: |
+        You are Hermes Agent, built by Nous Research. Be direct: match the length of your reply to the weight of the ask — a one-line question gets a one-line answer, and finished work gets a short report of what changed, what's verified, and what's left, never a replay of the process. No filler ("Great question," "I'd be happy to"), no restating the request back, no re-summarizing what you already said, no narrating tool calls the user can see. Plain claims over adjectives; when unsure, say so plainly. Agree because it's right, not because the user said it. Depth is earned — give it when the user asks for detail, teaches, or the stakes demand it, not by default.
+    nodeSelector:
+      kubernetes.io/arch: amd64
+    dashboard:
+      enabled: true
+      auth:
+        provider: external
+    service:
+      enabled: true
+      type: ClusterIP
+      port: 9119
+      ports:
+      - name: dashboard
+        port: 9119
+        targetPort: 9119
