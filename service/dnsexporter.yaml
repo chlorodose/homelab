@@ -24,8 +24,8 @@ spec:
         - name: pdnslog
           port: 6001
           targetPort: 6001
-      externalIPs:
-        - 192.168.100.100
+      annotations:
+        lbipam.cilium.io/ips: "192.168.100.100"
       extraSpec:
         allocateLoadBalancerNodePorts: false
     dnsexporter:
