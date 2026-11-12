@@ -5,3 +5,12 @@ machine:
 apiVersion: v1alpha1
 kind: HostnameConfig
 hostname: worker1.cluster.local
+---
+apiVersion: v1alpha1
+kind: LinkConfig
+name: ens18
+up: true
+addresses:
+  - address: 192.168.127.2/17
+routes:
+  - gateway: 192.168.0.1
