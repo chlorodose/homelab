@@ -92,6 +92,7 @@ spec:
   replicas: 1
   args:
     - "--default_lua_flags=allow-undeclared-keys"
+    - --proactor_threads=2
   authentication:
     passwordFromSecret:
       name: sub2api-redis-token
