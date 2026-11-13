@@ -1,7 +1,5 @@
 machine: {}
 cluster:
-  proxy:
-    disabled: true
   externalCloudProvider:
     enabled: true
 ---
@@ -30,6 +28,8 @@ nameservers:
   - address: 192.168.0.1
 hostDNS:
   enabled: true
+  # Works with Cilium's iptables masquerading; if Cilium switches to bpf.masquerade=true,
+  # also set bpf.hostLegacyRouting=true or disable this.
   forwardKubeDNSToHost: true
   resolveMemberNames: false
 ---

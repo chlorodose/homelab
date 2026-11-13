@@ -6,3 +6,13 @@ apiVersion: v1alpha1
 kind: Layer2VIPConfig
 name: 192.168.1.100
 link: ens18
+---
+# Cilium replaces kube-proxy and provides the CNI.
+apiVersion: v1alpha1
+kind: KubeProxyConfig
+enabled: false
+---
+# No KubeFlannelCNIConfig document means CNI "none" (see talos hack/test/patches/cilium-*.yaml).
+apiVersion: v1alpha1
+kind: KubeFlannelCNIConfig
+$patch: delete
