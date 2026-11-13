@@ -1,0 +1,61 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: snapshot-controller
+spec:
+  url: oci://ghcr.io/piraeusdatastore/helm-charts/snapshot-controller
+  ref:
+    semver: "^5.4"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: snapshot-controller
+spec:
+  targetNamespace: kube-system
+  chartRef:
+    kind: OCIRepository
+    name: snapshot-controller
+  values:
+    # CRDs come from crd/snapshot-crds.yaml.
+    installCRDs: false
+    webhook:
+      enabled: false
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: backube
+spec:
+  url: https://backube.github.io/helm-charts
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmChart
+metadata:
+  name: snapscheduler
+spec:
+  chart: snapscheduler
+  version: "^3.5"
+  sourceRef:
+    kind: HelmRepository
+    name: backube
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: snapscheduler
+spec:
+  targetNamespace: manager
+  chartRef:
+    kind: HelmChart
+    name: snapscheduler
+---
+# proxmox-csi snapshots are full copies on the source storage (single Proxmox host).
+# Delete lets SnapScheduler retention actually free the copies; PVC deletion does not
+# remove existing snapshots.
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: proxmox
+driver: csi.proxmox.sinextra.dev
+deletionPolicy: Delete

@@ -17,6 +17,10 @@ spec:
     kind: OCIRepository
     name: proxmox-csi
   values:
+    controller:
+      # VolumeSnapshot support (experimental upstream; requires root@pam credentials).
+      snapshotter:
+        enabled: true
     nodeSelector:
       node-role.kubernetes.io/control-plane: ""
     tolerations:

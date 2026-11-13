@@ -1,0 +1,81 @@
+# Alertmanager currently routes to "blackhole": these show up in vmalert/Grafana only.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: volume-snapshot-backups
+  namespace: manager
+spec:
+  groups:
+    - name: volume-snapshot-backups
+      rules:
+        - alert: VolumeSnapshotStale
+          expr: |
+            time() - max by (namespace, source_pvc) (
+              kube_volumesnapshot_created_timestamp{schedule=~".+-daily"}
+              * on (namespace, name) group_left ()
+              (kube_volumesnapshot_ready == 1)
+            ) > 26 * 3600
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "No ready daily snapshot of {{ $labels.namespace }}/{{ $labels.source_pvc }} in 26h"
+        - alert: VolumeSnapshotNotReady
+          expr: kube_volumesnapshot_ready == 0
+          for: 2h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Snapshot {{ $labels.namespace }}/{{ $labels.name }} not ready after 2h"
+        - alert: KanidmVolumeSnapshotMissing
+          expr: absent(kube_volumesnapshot_ready{namespace="service", source_pvc="kanidm-database-kanidm-0"} == 1)
+          for: 2h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Kanidm database PVC has no ready VolumeSnapshot"
+---
+# vmalert instance for LogsQL rules (VictoriaLogs datasource).
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMAlert
+metadata:
+  name: vlogs
+  namespace: manager
+spec:
+  datasource:
+    url: http://vlselect-vlogs.database.svc:9471
+  notifiers:
+    - url: http://vmalertmanager-monitoring-victoria-metrics-k8s-stack.manager.svc:9093
+  remoteWrite:
+    url: http://vmsingle-monitoring-victoria-metrics-k8s-stack.manager.svc:8428
+  remoteRead:
+    url: http://vmsingle-monitoring-victoria-metrics-k8s-stack.manager.svc:8428
+  evaluationInterval: 5m
+  ruleNamespaceSelector: {}
+  ruleSelector:
+    matchLabels:
+      alert-datasource: vlogs
+  extraArgs:
+    rule.defaultRuleType: vlogs
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: kanidm-online-backup
+  namespace: manager
+  labels:
+    alert-datasource: vlogs
+spec:
+  groups:
+    - name: kanidm-online-backup
+      type: vlogs
+      interval: 10m
+      rules:
+        - alert: KanidmOnlineBackupMissing
+          expr: >-
+            _time:26h kubernetes.pod_namespace:service kubernetes.pod_name:kanidm-0
+            "Online backup created" | stats count() as backups | filter backups:<1
+          labels:
+            severity: warning
+          annotations:
+            summary: "Kanidm online_backup has not logged a successful backup in 26h"

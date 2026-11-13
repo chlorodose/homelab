@@ -4,6 +4,7 @@ resources:
   - cilium.yaml
   - proxmox-ccm.yaml
   - proxmox-csi.yaml
+  - volume-snapshot.yaml
   - spegel.yaml
   - cloudflared.yaml
   - cert-manager.yaml
@@ -14,6 +15,7 @@ resources:
   - secret-generator.yaml
   - victoria.yaml
   - monitoring.yaml
+  - backup-alerts.yaml
   - etcd-metrics-ca-sync.yaml
   - local-csi.yaml
   - seaweedfs.yaml

@@ -110,3 +110,38 @@ spec:
   validation:
     wellKnownCACertificates: "System"
     hostname: idm.lilith-aster.me
+---
+# Volume snapshots of the database PVC. Kanidm's own online_backup writes a JSON
+# backup into /data/backups at 00:00 UTC (7 kept), so every snapshot also carries
+# the latest JSON backups: restore either the whole volume or one JSON file.
+apiVersion: snapscheduler.backube/v1
+kind: SnapshotSchedule
+metadata:
+  name: kanidm-daily
+  namespace: service
+spec:
+  schedule: "30 0 * * *"
+  claimSelector:
+    matchLabels:
+      app.kubernetes.io/name: kanidm
+      app.kubernetes.io/instance: kanidm
+  retention:
+    maxCount: 7
+  snapshotTemplate:
+    snapshotClassName: proxmox
+---
+apiVersion: snapscheduler.backube/v1
+kind: SnapshotSchedule
+metadata:
+  name: kanidm-weekly
+  namespace: service
+spec:
+  schedule: "0 1 * * 0"
+  claimSelector:
+    matchLabels:
+      app.kubernetes.io/name: kanidm
+      app.kubernetes.io/instance: kanidm
+  retention:
+    maxCount: 4
+  snapshotTemplate:
+    snapshotClassName: proxmox
