@@ -24,6 +24,31 @@ spec:
           annotations:
             summary: "Kanidm backup archive job {{ $labels.job_name }} failed"
 ---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: pgbackup-mirror
+  namespace: manager
+spec:
+  groups:
+    - name: pgbackup-mirror
+      rules:
+        - alert: PgBackupMirrorStale
+          expr: |
+            time() - kube_cronjob_status_last_successful_time{namespace="database", cronjob="pgbackup-mirror"} > 6 * 3600
+            or absent(kube_cronjob_status_last_successful_time{namespace="database", cronjob="pgbackup-mirror"})
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "VersityGW -> SeaweedFS pgbackup mirror has not succeeded in 6h"
+        - alert: PgBackupMirrorJobFailed
+          expr: kube_job_status_failed{namespace="database", job_name=~"pgbackup-mirror-.*"} > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "pgbackup mirror job {{ $labels.job_name }} failed"
+---
 # vmalert instance for LogsQL rules (VictoriaLogs datasource).
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMAlert

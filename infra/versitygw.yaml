@@ -1,0 +1,113 @@
+# Primary target for CNPG WAL archiving and base backups. It must not depend on
+# Postgres: SeaweedFS keeps its filer metadata in Postgres, so archiving straight
+# to SeaweedFS deadlocked primary shutdown when SeaweedFS went down with it.
+# A CronJob in infra/cnpg.yaml copies everything from here to SeaweedFS pgbackup.
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  name: versitygw-root
+  namespace: database
+  annotations:
+    secret-generator.v1.mittwald.de/autogenerate: secretKey
+    secret-generator.v1.mittwald.de/encoding: hex
+stringData:
+  accessKey: versity-root
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: versitygw-data
+  namespace: database
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: proxmox-nvram
+  resources:
+    requests:
+      storage: 64Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: versitygw
+  namespace: database
+  labels:
+    app.kubernetes.io/name: versitygw
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: versitygw
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: versitygw
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: versitygw
+          image: ghcr.io/versity/versitygw:v1.10.0
+          args: ["--port", ":7070", "posix", "/data"]
+          env:
+            - name: ROOT_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: versitygw-root
+                  key: accessKey
+            - name: ROOT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: versitygw-root
+                  key: secretKey
+          ports:
+            - name: s3
+              containerPort: 7070
+          readinessProbe:
+            tcpSocket:
+              port: s3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: s3
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: versitygw-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: versitygw
+  namespace: database
+spec:
+  selector:
+    app.kubernetes.io/name: versitygw
+  ports:
+    - name: s3
+      port: 7070
+      targetPort: s3

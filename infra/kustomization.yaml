@@ -9,6 +9,7 @@ resources:
   - cert-manager.yaml
   - envoy-gateway.yaml
   - cnpg.yaml
+  - versitygw.yaml
   - reflector.yaml
   - redis.yaml
   - secret-generator.yaml
