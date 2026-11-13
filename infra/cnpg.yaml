@@ -115,7 +115,9 @@ spec:
     - name: barman-cloud.cloudnative-pg.io
       isWALArchiver: true
       parameters:
-        barmanObjectName: pgbackup
+        # VersityGW, not SeaweedFS: SeaweedFS depends on this cluster (filer metadata).
+        barmanObjectName: pgbackup-versity
+  # Only used at bootstrap time.
   externalClusters:
     - name: origin
       plugin:
