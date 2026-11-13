@@ -4,7 +4,6 @@ resources:
   - cilium.yaml
   - proxmox-ccm.yaml
   - proxmox-csi.yaml
-  - volume-snapshot.yaml
   - spegel.yaml
   - cloudflared.yaml
   - cert-manager.yaml

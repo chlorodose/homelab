@@ -17,10 +17,9 @@ spec:
     kind: OCIRepository
     name: proxmox-csi
   values:
-    controller:
-      # VolumeSnapshot support (experimental upstream; requires root@pam credentials).
-      snapshotter:
-        enabled: true
+    # VolumeSnapshots are not usable here: k8s-storage-nvram is a natively encrypted
+    # ZFS dataset and proxmox-csi copies volumes via pvesm export (zfs send without
+    # --raw), which ZFS rejects for encrypted datasets.
     nodeSelector:
       node-role.kubernetes.io/control-plane: ""
     tolerations:

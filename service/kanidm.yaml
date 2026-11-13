@@ -111,37 +111,121 @@ spec:
     wellKnownCACertificates: "System"
     hostname: idm.lilith-aster.me
 ---
-# Volume snapshots of the database PVC. Kanidm's own online_backup writes a JSON
-# backup into /data/backups at 00:00 UTC (7 kept), so every snapshot also carries
-# the latest JSON backups: restore either the whole volume or one JSON file.
-apiVersion: snapscheduler.backube/v1
-kind: SnapshotSchedule
+# Backup archive. Kanidm's online_backup writes backup-<time>.json.gz into
+# /data/backups at 00:00 UTC and keeps 7 there. This CronJob copies them to a
+# separate volume and keeps every backup from the last 7 days plus Sunday backups
+# for 28 days, so a lost or corrupted database volume still leaves a restore path.
+apiVersion: v1
+kind: PersistentVolumeClaim
 metadata:
-  name: kanidm-daily
+  name: kanidm-backup-archive
+  namespace: service
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: proxmox-nvram
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kanidm-backup-archive
   namespace: service
 spec:
   schedule: "30 0 * * *"
-  claimSelector:
-    matchLabels:
-      app.kubernetes.io/name: kanidm
-      app.kubernetes.io/instance: kanidm
-  retention:
-    maxCount: 7
-  snapshotTemplate:
-    snapshotClassName: proxmox
----
-apiVersion: snapscheduler.backube/v1
-kind: SnapshotSchedule
-metadata:
-  name: kanidm-weekly
-  namespace: service
-spec:
-  schedule: "0 1 * * 0"
-  claimSelector:
-    matchLabels:
-      app.kubernetes.io/name: kanidm
-      app.kubernetes.io/instance: kanidm
-  retention:
-    maxCount: 4
-  snapshotTemplate:
-    snapshotClassName: proxmox
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 900
+      template:
+        spec:
+          restartPolicy: Never
+          # The database volume is ReadWriteOnce: run next to kanidm-0 to mount it.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: kanidm
+                      app.kubernetes.io/instance: kanidm
+          securityContext:
+            # Kanidm writes backups as root with mode 0600.
+            runAsUser: 0
+            runAsGroup: 0
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: archive
+              image: busybox:1.36
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  SRC=/source/backups
+                  DST=/archive
+                  found=0
+                  for f in "$SRC"/backup-*.json.gz; do
+                    [ -e "$f" ] || continue
+                    found=1
+                    b=$(basename "$f")
+                    [ -e "$DST/$b" ] && continue
+                    cp -p "$f" "$DST/.$b.tmp"
+                    gzip -t "$DST/.$b.tmp"
+                    mv "$DST/.$b.tmp" "$DST/$b"
+                    echo "archived $b"
+                  done
+                  [ "$found" = 1 ] || { echo "no backups found in $SRC" >&2; exit 1; }
+
+                  now=$(date -u +%s)
+                  for f in "$DST"/backup-*.json.gz; do
+                    [ -e "$f" ] || continue
+                    b=$(basename "$f")
+                    d=${b#backup-}
+                    d=${d%%T*}
+                    age=$(( (now - $(date -u -d "$d" +%s)) / 86400 ))
+                    dow=$(date -u -d "$d" +%u)
+                    if [ "$age" -gt 28 ] || { [ "$age" -gt 7 ] && [ "$dow" != 7 ]; }; then
+                      rm -f "$f"
+                      echo "pruned $b"
+                    fi
+                  done
+
+                  # Fail (and alert) if Kanidm has not produced a backup in 26h.
+                  if [ -z "$(find "$DST" -name 'backup-*.json.gz' -mmin -1560)" ]; then
+                    echo "newest archived backup is older than 26h" >&2
+                    exit 1
+                  fi
+                  ls -l "$DST"
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  memory: 64Mi
+              volumeMounts:
+                - name: source
+                  mountPath: /source
+                  readOnly: true
+                - name: archive
+                  mountPath: /archive
+          volumes:
+            - name: source
+              persistentVolumeClaim:
+                claimName: kanidm-database-kanidm-0
+                readOnly: true
+            - name: archive
+              persistentVolumeClaim:
+                claimName: kanidm-backup-archive

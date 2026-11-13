@@ -10,7 +10,6 @@ resources:
   - cnpg-crds.yaml
   - redis-crds.yaml
   - seaweedfs-crds.yaml
-  - snapshot-crds.yaml
 patches:
   - target:
       group: helm.toolkit.fluxcd.io

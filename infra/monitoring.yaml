@@ -138,42 +138,6 @@ spec:
           honorLabels: true
       vmScrape:
         enabled: false
-      rbac:
-        extraRules:
-          - apiGroups: [snapshot.storage.k8s.io]
-            resources: [volumesnapshots]
-            verbs: [list, watch]
-      # Backup freshness alerts (infra/backup-alerts.yaml) read these.
-      customResourceState:
-        enabled: true
-        config:
-          kind: CustomResourceStateMetrics
-          spec:
-            resources:
-              - groupVersionKind:
-                  group: snapshot.storage.k8s.io
-                  version: v1
-                  kind: VolumeSnapshot
-                metricNamePrefix: kube_volumesnapshot
-                labelsFromPath:
-                  namespace: [metadata, namespace]
-                  name: [metadata, name]
-                  source_pvc: [spec, source, persistentVolumeClaimName]
-                  schedule: [metadata, labels, snapscheduler.backube/schedule]
-                metrics:
-                  - name: created_timestamp
-                    help: Unix time the snapshot was taken.
-                    each:
-                      type: Gauge
-                      gauge:
-                        path: [status, creationTime]
-                  - name: ready
-                    help: Whether the snapshot is ready to use.
-                    each:
-                      type: Gauge
-                      gauge:
-                        path: [status, readyToUse]
-                        nilIsZero: true
     # Keep the chart's recording rules: Kubernetes dashboards depend on them.
     vmalert:
       enabled: true
