@@ -115,6 +115,89 @@ spec:
 # /data/backups at 00:00 UTC and keeps 7 there. This CronJob copies them to a
 # separate volume and keeps every backup from the last 7 days plus Sunday backups
 # for 28 days, so a lost or corrupted database volume still leaves a restore path.
+# It then uploads the archive to the kanidm-backup S3 bucket (SeaweedFS, on the
+# separate hddr disks) with copy-only semantics; the bucket expires objects
+# after 90 days.
+apiVersion: seaweed.seaweedfs.com/v1
+kind: Bucket
+metadata:
+  name: kanidm-backup
+  namespace: database
+spec:
+  clusterRef:
+    name: seaweed
+  reclaimPolicy: Retain
+  adoptExisting: true
+  versioning: Off
+  objectLock: false
+  quota:
+    size: 1Gi
+    enforce: true
+  owner: kanidm-backup
+  access:
+    - user: kanidm-backup
+      actions: [Read, Write, List]
+  placement:
+    fsync: false
+    worm: false
+    readOnly: false
+  anonymousRead: false
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: BucketLifecyclePolicy
+metadata:
+  name: kanidm-backup
+  namespace: database
+spec:
+  bucketRef:
+    name: kanidm-backup
+  reclaimPolicy: Delete
+  rules:
+    - id: expire-after-90-days
+      status: Enabled
+      expiration:
+        days: 90
+      abortIncompleteMultipartUpload:
+        daysAfterInitiation: 1
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: S3Identity
+metadata:
+  name: kanidm-backup
+  namespace: database
+spec:
+  seaweedRef:
+    name: seaweed
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: ResourceReferenceGrant
+metadata:
+  name: allow-kanidm-backup-from-service
+  namespace: database
+spec:
+  from:
+    - group: seaweed.seaweedfs.com
+      kind: S3Credentials
+      namespace: service
+  to:
+    - group: seaweed.seaweedfs.com
+      kind: S3Identity
+      name: kanidm-backup
+---
+apiVersion: seaweed.seaweedfs.com/v1
+kind: S3Credentials
+metadata:
+  name: kanidm-backup
+  namespace: service
+spec:
+  seaweedRef:
+    name: seaweed
+    namespace: database
+  identityRef:
+    name: kanidm-backup
+  secretRef:
+    name: seaweed-kanidm-backup-key
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -162,8 +245,8 @@ spec:
             runAsGroup: 0
             seccompProfile:
               type: RuntimeDefault
-          containers:
-            - name: archive
+          initContainers:
+            - name: collect
               image: busybox:1.36
               securityContext:
                 allowPrivilegeEscalation: false
@@ -221,7 +304,59 @@ spec:
                   readOnly: true
                 - name: archive
                   mountPath: /archive
+          containers:
+            - name: upload
+              image: rclone/rclone:1.75.2
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              # copy (never sync): an emptied archive must not delete the S3 copies.
+              args:
+                - copy
+                - /archive
+                - s3:kanidm-backup
+                - --include=backup-*.json.gz
+                - --immutable
+                - --checksum
+                - -v
+              env:
+                - name: HOME
+                  value: /tmp
+                - name: RCLONE_CONFIG
+                  value: /tmp/rclone.conf
+                - name: RCLONE_CONFIG_S3_TYPE
+                  value: s3
+                - name: RCLONE_CONFIG_S3_PROVIDER
+                  value: SeaweedFS
+                - name: RCLONE_CONFIG_S3_ENDPOINT
+                  value: http://seaweed-s3.database.svc:8333
+                - name: RCLONE_CONFIG_S3_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: seaweed-kanidm-backup-key
+                      key: accessKey
+                - name: RCLONE_CONFIG_S3_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: seaweed-kanidm-backup-key
+                      key: secretKey
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              volumeMounts:
+                - name: archive
+                  mountPath: /archive
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
           volumes:
+            - name: tmp
+              emptyDir: {}
             - name: source
               persistentVolumeClaim:
                 claimName: kanidm-database-kanidm-0
