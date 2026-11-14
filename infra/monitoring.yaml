@@ -19,6 +19,17 @@ spec:
   chartRef:
     kind: OCIRepository
     name: monitoring
+  # The chart renders the default `externalLabels: {}`, which helm-controller's
+  # server-side apply submits as null and the VMAgent CRD rejects. Drop the field.
+  postRenderers:
+    - kustomize:
+        patches:
+          - target:
+              group: operator.victoriametrics.com
+              kind: VMAgent
+            patch: |
+              - op: remove
+                path: /spec/externalLabels
   values:
     # The existing operator also manages VictoriaLogs; do not install a second one.
     victoria-metrics-operator:

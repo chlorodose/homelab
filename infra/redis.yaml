@@ -27,3 +27,24 @@ spec:
       enabled: true
     crds:
       install: false
+---
+# The operator's ServiceMonitor covers only the operator itself; scrape each
+# Dragonfly instance's admin port (9999, /metrics) for the Dragonfly dashboard,
+# whose variables use the pod's `app` label.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: dragonfly-instances
+  namespace: manager
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dragonfly
+      app.kubernetes.io/part-of: dragonfly
+  podTargetLabels:
+    - app
+  podMetricsEndpoints:
+    - port: admin
+      path: /metrics
