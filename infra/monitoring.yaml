@@ -171,7 +171,18 @@ spec:
           parentRefs:
             - name: default
       # The chart generates a random admin password in monitoring-grafana.
+      # Requires outbound access to grafana.com on startup.
+      plugins:
+        - victoriametrics-logs-datasource
     defaultDatasources:
+      # VictoriaLogs (infra/victoria.yaml) is not managed by this chart. Using
+      # `external.vl.read` instead would also reroute vmalert through a VMAuth.
+      extra:
+        - name: VictoriaLogs
+          type: victoriametrics-logs-datasource
+          uid: victorialogs
+          access: proxy
+          url: http://vlselect-vlogs.database.svc:9471
       victoriametrics:
         datasources:
           - name: Prometheus
