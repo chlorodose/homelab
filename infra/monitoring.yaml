@@ -37,8 +37,10 @@ spec:
       spec:
         selectAllByDefault: true
         scrapeInterval: 30s
-        externalLabels:
-          cluster: homelab
+        # No `cluster` external label: single cluster, and vmagent applies external
+        # labels after metric relabeling, renaming a scraped `cluster` label (e.g.
+        # CNPG's cnpg_collector_up{cluster="postgres"}) to exported_cluster, which
+        # breaks the CNPG dashboard's cluster variable.
         # Talos control-plane metrics bind to loopback. There is one control-plane
         # node in this cluster; collect locally without changing its listeners.
         hostNetwork: true
@@ -92,8 +94,10 @@ spec:
         # through the host-networked API server pods.
         selector:
           component: kube-apiserver
-        port: 2379
-        targetPort: 2379
+        # Talos runs etcd with --listen-client-http-urls=https://0.0.0.0:2383:
+        # 2379 then serves gRPC only, and /metrics moves to 2383.
+        port: 2383
+        targetPort: 2383
       vmScrape:
         spec:
           endpoints:
@@ -114,6 +118,28 @@ spec:
     # Cilium replaces kube-proxy.
     kubeProxy:
       enabled: false
+    # kube-prometheus bundle dashboards that can never have data here: no Windows,
+    # AIX or macOS nodes, and no Prometheus server (VMAgent/VMSingle instead).
+    defaultDashboards:
+      dashboards:
+        k8s-resources-windows-cluster:
+          enabled: false
+        k8s-resources-windows-namespace:
+          enabled: false
+        k8s-resources-windows-pod:
+          enabled: false
+        k8s-windows-cluster-rsrc-use:
+          enabled: false
+        k8s-windows-node-rsrc-use:
+          enabled: false
+        nodes-aix:
+          enabled: false
+        nodes-darwin:
+          enabled: false
+        prometheus:
+          enabled: false
+        prometheus-remote-write:
+          enabled: false
     prometheus-node-exporter:
       namespaceOverride: kube-system
       hostRootFsMount:

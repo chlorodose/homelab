@@ -41,6 +41,8 @@ metadata:
   name: seaweed
   namespace: database
 spec:
+  # metricsPort on a component makes the operator expose it and create a
+  # ServiceMonitor for it (spec.serviceMonitor defaults to enabled).
   admin:
     credentialsSecret:
       name: seaweedfs-admin-token
@@ -61,6 +63,7 @@ spec:
             name: seaweedfs-database-token
             key: password
     replicas: 1
+    metricsPort: 9326
   image: chrislusf/seaweedfs:4.53
   worker:
     replicas: 2
@@ -78,6 +81,7 @@ spec:
           storage: 1Gi
       storageClassName: proxmox-nvram
     replicas: 1
+    metricsPort: 9324
     volumeSizeLimitMB: 1024
   # backup:
   #   storages:
@@ -97,6 +101,7 @@ spec:
   s3:
     iam: true
     replicas: 1
+    metricsPort: 9327
   volume:
     kind: StatefulSet
     replicas: 0
@@ -108,6 +113,7 @@ spec:
       dataCenter: default
       rack: default
       replicas: 4
+      metricsPort: 9325
       requests:
         storage: 1860Gi
       storageClassName: hddr-volumes
