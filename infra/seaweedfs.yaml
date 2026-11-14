@@ -263,7 +263,7 @@ spec:
   parentRefs:
     - name: default
   hostnames:
-    - seaweed.chlorodose.me
+    - seaweed.internal.lilith-aster.me
   rules:
     - matches:
         - path:
