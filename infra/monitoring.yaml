@@ -328,3 +328,33 @@ spec:
     name: etcd-metrics-ca
     kind: Issuer
     group: cert-manager.io
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vmetrics-ui
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+  hostnames:
+    - vmetrics.internal.lilith-aster.me
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /vmui/
+            statusCode: 302
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: vmsingle-monitoring-victoria-metrics-k8s-stack
+          port: 8428
