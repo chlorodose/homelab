@@ -61,7 +61,7 @@ spec:
             name: seaweedfs-database-token
             key: password
     replicas: 1
-  image: chrislusf/seaweedfs:latest
+  image: chrislusf/seaweedfs:4.53
   worker:
     replicas: 2
     jobType: "all"
