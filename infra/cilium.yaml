@@ -129,7 +129,7 @@ spec:
   parentRefs:
     - name: default
   hostnames:
-    - hubble.internal.chlorodose.me
+    - hubble.internal.lilith-aster.me
   rules:
     - matches:
         - path:

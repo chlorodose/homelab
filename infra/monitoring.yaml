@@ -167,7 +167,7 @@ spec:
         main:
           enabled: true
           hostnames:
-            - grafana.internal.chlorodose.me
+            - grafana.internal.lilith-aster.me
           parentRefs:
             - name: default
       # The chart generates a random admin password in monitoring-grafana.

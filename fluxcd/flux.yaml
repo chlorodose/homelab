@@ -55,7 +55,7 @@ spec:
   parentRefs:
     - name: default
   hostnames:
-    - fluxcd.internal.chlorodose.me
+    - fluxcd.internal.lilith-aster.me
   rules:
     - matches:
         - path:

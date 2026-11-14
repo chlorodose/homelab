@@ -416,7 +416,7 @@ spec:
     - server auth
   commonName: postgres
   dnsNames:
-    - postgres.internal.chlorodose.me
+    - postgres.internal.lilith-aster.me
     - postgres-rw.database.svc
     - postgres-r.database.svc
     - postgres-ro.database.svc

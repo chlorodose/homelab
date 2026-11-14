@@ -118,7 +118,6 @@ spec:
   dnsNames:
     - "chlorodose.me"
     - "*.chlorodose.me"
-    - "*.internal.chlorodose.me"
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -133,6 +132,7 @@ spec:
   dnsNames:
     - "lilith-aster.me"
     - "*.lilith-aster.me"
+    - "*.internal.lilith-aster.me"
 ---
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: HTTPRouteFilter
