@@ -35,6 +35,10 @@ metadata:
 spec:
   vlinsert:
     replicaCount: 1
+    syslogSpec:
+      tcpListeners:
+        # Plain TCP; TLS is terminated at the gateway (syslog.internal.lilith-aster.me:6514)
+        - listenPort: 5140
   vlselect:
     replicaCount: 1
   vlstorage:
@@ -69,3 +73,35 @@ spec:
       effect: NoSchedule
     - operator: Exists
       effect: PreferNoSchedule
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: from-gateway-to-vlinsert
+  namespace: database
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: TCPRoute
+      namespace: manager
+  to:
+    - group: ""
+      kind: Service
+      name: vlinsert-vlogs
+---
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TCPRoute
+metadata:
+  name: vlogs-syslog
+  namespace: manager
+spec:
+  parentRefs:
+    - name: default
+      sectionName: syslog
+  rules:
+    - name: route
+      backendRefs:
+        - name: vlinsert-vlogs
+          namespace: database
+          kind: Service
+          port: 5140

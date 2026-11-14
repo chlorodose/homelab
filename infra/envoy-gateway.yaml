@@ -103,6 +103,19 @@ spec:
         kinds:
           - group: gateway.networking.k8s.io
             kind: TCPRoute
+    - name: syslog # syslog over TLS (RFC 5425), syslog.internal.lilith-aster.me
+      protocol: TLS
+      port: 6514
+      allowedRoutes:
+        namespaces:
+          from: Same
+        kinds:
+          - group: gateway.networking.k8s.io
+            kind: TCPRoute
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: lilith-aster.me
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
