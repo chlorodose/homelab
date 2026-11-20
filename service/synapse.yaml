@@ -364,5 +364,6 @@ spec:
       filters:
         - type: RequestRedirect
           requestRedirect:
+            scheme: https
             hostname: matrix.lilith-aster.me
             statusCode: 302
