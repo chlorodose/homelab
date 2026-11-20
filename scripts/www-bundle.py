@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish a single-file HTML bundle onto www.lilith-aster.me.
+"""Publish a single-file HTML bundle onto lilith-aster.me.
 
 Splits the bundle into a wrapper page at service/www/<page>/index.html and
 content-addressed files at service/www/asserts/<sha256>.<ext> (embedded data:
