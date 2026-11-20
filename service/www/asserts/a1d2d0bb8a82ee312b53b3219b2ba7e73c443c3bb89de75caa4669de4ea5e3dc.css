@@ -1,0 +1,6 @@
+@font-face{font-family:FPX;src:url("https://cdn.jsdelivr.net/npm/@fontsource/fusion-pixel-12px-proportional-sc@5.3.0/files/fusion-pixel-12px-proportional-sc-latin-400-normal.woff2") format('woff2');font-display:swap}
+@font-face{font-family:FPJA;src:url("https://cdn.jsdelivr.net/npm/@fontsource/fusion-pixel-12px-proportional-jp@5.3.0/files/fusion-pixel-12px-proportional-jp-latin-400-normal.woff2") format('woff2');font-display:swap}
+@font-face{font-family:FPEN;src:url(/asserts/adb1dc3a4b7b36a8aa3fd9572c6ae7332ec4a9d3acb5a8c315ac5a2fd92a908a.woff2) format('woff2');font-display:swap}
+html,body{margin:0;height:100%;background:#0e0f19;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;overscroll-behavior:none}
+#game{position:absolute;image-rendering:pixelated;image-rendering:crisp-edges;cursor:none;display:block;outline:none}
+#ui{position:fixed;left:0;top:0;pointer-events:none;display:none;z-index:2}

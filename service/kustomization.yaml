@@ -11,5 +11,6 @@ resources:
   - openlist.yaml
   - dnsexporter.yaml
   - sub2api.yaml
+  - www
 components:
   - ../utils
