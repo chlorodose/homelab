@@ -2,7 +2,7 @@
 """Publish a single-file HTML bundle onto lilith-aster.me.
 
 Splits the bundle into a wrapper page at service/www/<page>/index.html and
-content-addressed files at service/www/asserts/<sha256>.<ext> (embedded data:
+content-addressed files at service/www/assets/<sha256>.<ext> (embedded data:
 URIs, the inline <style> and the inline <script>), prunes assets no longer
 referenced by any page, and regenerates service/www/kustomization.yaml.
 
@@ -16,8 +16,8 @@ import sys
 from pathlib import Path
 
 WWW = Path(__file__).resolve().parent.parent / "service" / "www"
-ASSETS = WWW / "asserts"
-PREFIX = "/asserts/"
+ASSETS = WWW / "assets"
+PREFIX = "/assets/"
 EXT = {
     "image/webp": "webp",
     "image/png": "png",
@@ -106,8 +106,8 @@ def regen() -> None:
             "    files:",
             f"      - index.html={page}/index.html",
         ]
-    lines += ["  - name: www-asserts", "    namespace: service", "    files:"]
-    lines += [f"      - asserts/{a}" for a in assets]
+    lines += ["  - name: www-assets", "    namespace: service", "    files:"]
+    lines += [f"      - assets/{a}" for a in assets]
     (WWW / "kustomization.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

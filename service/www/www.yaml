@@ -55,8 +55,8 @@ spec:
             - name: page-paperclip520
               mountPath: /srv/PAPERCLIP520
               readOnly: true
-            - name: asserts
-              mountPath: /srv/asserts
+            - name: assets
+              mountPath: /srv/assets
               readOnly: true
       volumes:
         - name: tmp
@@ -70,9 +70,9 @@ spec:
         - name: page-paperclip520
           configMap:
             name: www-page-paperclip520
-        - name: asserts
+        - name: assets
           configMap:
-            name: www-asserts
+            name: www-assets
 ---
 apiVersion: v1
 kind: Service
