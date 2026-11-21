@@ -188,6 +188,43 @@ spec:
           honorLabels: true
       vmScrape:
         enabled: false
+    # Notifications go to the public ntfy.sh. Only the highest severity and the
+    # firing count leave the cluster: `payload` replaces the default webhook body,
+    # which would carry every alert's labels and annotations. The topic is the only
+    # access control, so the full URL lives in the unmanaged `alertmanager-ntfy`
+    # Secret (secrets/alertmanager-ntfy.env), never in git. It is
+    # https://ntfy.sh/<topic>?tpl=yes&t={{.title}}&m={{.message}}&p={{.priority}}
+    # (URL-encoded), so ntfy renders title/message/priority from the payload.
+    alertmanager:
+      spec:
+        secrets:
+          - alertmanager-ntfy
+      config:
+        route:
+          receiver: blackhole
+          # No group_by: every alert shares one group, so one notification
+          # summarises everything that is firing.
+          group_wait: 30s
+          group_interval: 5m
+          repeat_interval: 12h
+          routes:
+            # info (and Watchdog's "none") stay in vmalert/Grafana only.
+            - receiver: ntfy
+              matchers:
+                - severity=~"warning|critical"
+        receivers:
+          - name: blackhole
+          - name: ntfy
+            webhook_configs:
+              - url_file: /etc/vm/secrets/alertmanager-ntfy/url
+                send_resolved: true
+                payload:
+                  title: >-
+                    {{ if eq .Status "firing" }}{{ $crit := false }}{{ range .Alerts.Firing }}{{ if eq .Labels.severity "critical" }}{{ $crit = true }}{{ end }}{{ end }}{{ if $crit }}CRITICAL{{ else }}WARNING{{ end }}{{ else }}RESOLVED{{ end }}
+                  message: >-
+                    {{ if eq .Status "firing" }}{{ len .Alerts.Firing }} alert(s) firing{{ else }}No alerts firing{{ end }}
+                  priority: >-
+                    {{ if eq .Status "firing" }}{{ $crit := false }}{{ range .Alerts.Firing }}{{ if eq .Labels.severity "critical" }}{{ $crit = true }}{{ end }}{{ end }}{{ if $crit }}5{{ else }}3{{ end }}{{ else }}3{{ end }}
     # Keep the chart's recording rules: Kubernetes dashboards depend on them.
     vmalert:
       enabled: true

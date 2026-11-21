@@ -1,4 +1,4 @@
-# Alertmanager currently routes to "blackhole": these show up in vmalert/Grafana only.
+# Alertmanager pushes warning/critical alerts to ntfy.sh (see infra/monitoring.yaml).
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMRule
 metadata:
