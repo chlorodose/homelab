@@ -151,6 +151,17 @@ spec:
           enabled: false
         prometheus-remote-write:
           enabled: false
+    # Talos has no systemd and no Linux software RAID (mdadm).
+    defaultRules:
+      rules:
+        NodeRAIDDegraded:
+          enabled: false
+        NodeRAIDDiskFailure:
+          enabled: false
+        NodeSystemdServiceFailed:
+          enabled: false
+        NodeSystemdServiceCrashlooping:
+          enabled: false
     prometheus-node-exporter:
       namespaceOverride: kube-system
       hostRootFsMount:
@@ -168,6 +179,8 @@ spec:
       vmScrape:
         enabled: false
     kube-state-metrics:
+      selfMonitor:
+        enabled: true
       prometheus:
         monitor:
           enabled: true
