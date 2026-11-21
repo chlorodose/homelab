@@ -1,0 +1,3997 @@
+# Network device monitoring: scrape exporters, alert rules and Grafana dashboards
+# for the XGS-PON SFP modem (modem.local) and the switch (switch.internal.lilith-aster.me).
+#
+# Modem (8311 community firmware):
+# The modem has no metrics endpoint, so a small exporter logs into its LuCI web UI
+# and turns the PON status pages into Prometheus metrics. Credentials live in the
+# `modem-credentials` Secret (secrets/modem.env), never in git.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: modem-exporter
+  namespace: service
+data:
+  exporter.py: |
+    #!/usr/bin/env python3
+    """Prometheus exporter for an 8311-firmware XGS-PON SFP modem, scraped via its LuCI web UI."""
+    import http.cookiejar
+    import json
+    import os
+    import re
+    import threading
+    import time
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    BASE = os.environ["MODEM_URL"].rstrip("/")
+    USER = os.environ["MODEM_USERNAME"]
+    PASSWORD = os.environ["MODEM_PASSWORD"]
+    CACHE_TTL = float(os.environ.get("CACHE_TTL", "10"))
+    LUCI = BASE + "/cgi-bin/luci"
+    ADMIN = LUCI + "/admin/8311/"
+
+    lock = threading.Lock()
+    cache = (0.0, "")
+
+
+    class Session:
+        def __init__(self):
+            self.opener = None
+
+        def login(self):
+            jar = http.cookiejar.CookieJar()
+            self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+            data = urllib.parse.urlencode({"luci_username": USER, "luci_password": PASSWORD}).encode()
+            # A successful login answers 302 with a sysauth cookie, which urllib then follows.
+            self.opener.open(LUCI + "/", data, timeout=10).read()
+            if not any(c.name == "sysauth" for c in jar):
+                raise RuntimeError("login failed: no sysauth cookie")
+
+        def get(self, url):
+            for attempt in (0, 1):
+                if self.opener is None:
+                    self.login()
+                try:
+                    body = self.opener.open(url, timeout=10).read().decode("utf-8", "replace")
+                    # An expired session serves the login form instead of the data.
+                    if "luci_password" not in body:
+                        return body
+                except urllib.error.HTTPError as e:
+                    if e.code != 403:
+                        raise
+                if attempt:
+                    break
+                self.opener = None
+            raise RuntimeError("session rejected for " + url)
+
+
+    session = Session()
+
+
+    def esc(v):
+        return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+    class Out:
+        def __init__(self):
+            self.lines = []
+            self.seen = set()
+
+        def add(self, name, value, help_, typ="gauge", **labels):
+            if name not in self.seen:
+                self.seen.add(name)
+                self.lines.append(f"# HELP {name} {help_}")
+                self.lines.append(f"# TYPE {name} {typ}")
+            lbl = ",".join(f'{k}="{esc(v)}"' for k, v in labels.items())
+            self.lines.append(f"{name}{{{lbl}}} {value}" if lbl else f"{name} {value}")
+
+
+    def first_float(s):
+        m = re.search(r"-?\d+(?:\.\d+)?", s)
+        return float(m.group()) if m else None
+
+
+    def kv_page(text):
+        """Parse the `name : value` rows of a pontop page."""
+        out = {}
+        for line in text.splitlines():
+            if " : " in line:
+                k, v = line.split(" : ", 1)
+                out[k.strip()] = v.strip()
+        return out
+
+
+    def table_page(text):
+        rows = []
+        lines = text.splitlines()
+        for line in lines[2:]:
+            cols = line.split()
+            if cols and cols[0].isdigit():
+                rows.append(cols)
+        return rows
+
+
+    def collect():
+        o = Out()
+        t0 = time.time()
+        try:
+            status = json.loads(session.get(ADMIN + "gpon_status"))
+            optical = kv_page(session.get(ADMIN + "pontop/optical"))
+            fec = kv_page(session.get(ADMIN + "pontop/fec"))
+            gtc = kv_page(session.get(ADMIN + "pontop/gtc"))
+            gem = table_page(session.get(ADMIN + "pontop/gem_stats"))
+        except Exception as e:  # noqa: BLE001 - any failure means the modem is not scrapable
+            print("scrape failed:", repr(e), flush=True)
+            session.opener = None
+            o.add("modem_up", 0, "Whether the modem web UI was scraped successfully.")
+            o.add("modem_scrape_duration_seconds", round(time.time() - t0, 3), "Scrape duration.")
+            return "\n".join(o.lines) + "\n"
+
+        o.add("modem_up", 1, "Whether the modem web UI was scraped successfully.")
+
+        state = re.match(r"O(\d+)", status.get("status", ""))
+        if state:
+            o.add("modem_pon_state", int(state.group(1)), "PON ONU state: O1 (initial) to O5 (operation).")
+        o.add("modem_info", 1, "Static modem information.",
+              module=status.get("module_info", ""), pon_mode=status.get("pon_mode", ""),
+              active_bank=status.get("active_bank", ""), ploam_status=status.get("status", ""))
+
+        temps = [first_float(p) for p in status.get("temperature", "").split(" / ")]
+        for sensor, v in zip(("cpu0", "cpu1", "transceiver"), temps):
+            if v is not None:
+                o.add("modem_temperature_celsius", v, "Temperature by sensor.", sensor=sensor)
+
+        power = status.get("power", "").split(" / ")
+        if len(power) == 3:
+            rx, tx, bias = (first_float(p) for p in power)
+            o.add("modem_optical_rx_power_dbm", rx, "Optical receive power.")
+            o.add("modem_optical_tx_power_dbm", tx, "Optical transmit power.")
+            o.add("modem_optical_tx_bias_amperes", bias / 1000, "Laser transmit bias current.")
+        volt = first_float(status.get("voltage", ""))
+        if volt is not None:
+            o.add("modem_transceiver_voltage_volts", volt, "Transceiver supply voltage.")
+        speed = first_float(status.get("eth_speed", ""))
+        if speed is not None:
+            o.add("modem_ethernet_link_speed_mbps", speed, "Negotiated Ethernet link speed.")
+
+        o.add("modem_optical_rx_ok", int(optical.get("Receiver status") == "OK"),
+              "1 when the receiver reports OK (no loss of signal).")
+        o.add("modem_optical_tx_enabled", int(optical.get("Transmitter status", "").startswith("ENABLED")),
+              "1 when the transmitter is enabled.")
+
+        fec_counters = {
+            "BIP errors": ("modem_pon_bip_errors_total", "Bit interleaved parity errors."),
+            "Total FEC codewords": ("modem_pon_fec_codewords_total", "Downstream FEC codewords received."),
+            "Corrected FEC codewords": ("modem_pon_fec_codewords_corrected_total", "FEC codewords corrected."),
+            "Uncorrected FEC codewords": ("modem_pon_fec_codewords_uncorrected_total", "FEC codewords that could not be corrected."),
+            "Corrected FEC bytes": ("modem_pon_fec_bytes_corrected_total", "Bytes corrected by FEC."),
+            "FEC errored seconds": ("modem_pon_fec_errored_seconds_total", "Seconds containing FEC errors."),
+        }
+        for key, (name, help_) in fec_counters.items():
+            v = first_float(fec.get(key, ""))
+            if v is not None:
+                o.add(name, int(v), help_, "counter")
+        for direction in ("upstream", "downstream"):
+            o.add("modem_pon_fec_enabled", int(fec.get(f"FEC {direction}") == "ON"),
+                  "Whether FEC is enabled.", direction=direction)
+
+        gtc_counters = {
+            "PSBd HEC errors corrected": ("modem_pon_gtc_psbd_hec_corrected_errors_total", "Physical sync block HEC errors corrected."),
+            "PSBd HEC errors uncorrected": ("modem_pon_gtc_psbd_hec_uncorrected_errors_total", "Physical sync block HEC errors uncorrected."),
+            "FS HEC errors corrected": ("modem_pon_gtc_fs_hec_corrected_errors_total", "Frame sync HEC errors corrected."),
+            "FS HEC errors uncorrected": ("modem_pon_gtc_fs_hec_uncorrected_errors_total", "Frame sync HEC errors uncorrected."),
+            "Lost words due to HEC errors": ("modem_pon_gtc_lost_words_total", "Words lost to HEC errors."),
+            "PLOAM MIC errors": ("modem_pon_gtc_ploam_mic_errors_total", "PLOAM message integrity check errors."),
+        }
+        for key, (name, help_) in gtc_counters.items():
+            v = first_float(gtc.get(key, ""))
+            if v is not None:
+                o.add(name, int(v), help_, "counter")
+
+        # Columns: index, gem id, u/s packets, u/s bytes, d/s packets, d/s bytes, key errors.
+        for row in gem:
+            if len(row) < 7:
+                continue
+            gem_id = row[1]
+            for name, idx, help_ in (
+                ("modem_gem_upstream_packets_total", 2, "Upstream GEM port packets."),
+                ("modem_gem_upstream_bytes_total", 3, "Upstream GEM port bytes."),
+                ("modem_gem_downstream_packets_total", 4, "Downstream GEM port packets."),
+                ("modem_gem_downstream_bytes_total", 5, "Downstream GEM port bytes."),
+                ("modem_gem_key_errors_total", 6, "GEM port encryption key errors."),
+            ):
+                o.add(name, int(row[idx]), help_, "counter", gem_id=gem_id)
+
+        o.add("modem_scrape_duration_seconds", round(time.time() - t0, 3), "Scrape duration.")
+        return "\n".join(o.lines) + "\n"
+
+
+    def metrics():
+        global cache
+        with lock:
+            ts, body = cache
+            if time.time() - ts > CACHE_TTL:
+                body = collect()
+                cache = (time.time(), body)
+            return body
+
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path == "/metrics":
+                body, code = metrics().encode(), 200
+            elif self.path == "/healthz":
+                body, code = b"ok\n", 200
+            else:
+                body, code = b"not found\n", 404
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+
+    if __name__ == "__main__":
+        ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "9877"))), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: modem-exporter
+  namespace: service
+  labels:
+    app.kubernetes.io/name: modem-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: modem-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: modem-exporter
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exporter
+          image: python:3.14.10-alpine3.24
+          command: ["python3", "-I", "/app/exporter.py"]
+          env:
+            - name: MODEM_URL
+              # modem.local is mDNS and does not resolve inside the cluster.
+              value: http://192.168.0.200
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          envFrom:
+            - secretRef:
+                name: modem-credentials
+          ports:
+            - name: metrics
+              containerPort: 9877
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 96Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: script
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: script
+          configMap:
+            name: modem-exporter
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: modem-exporter
+  namespace: service
+  labels:
+    app.kubernetes.io/name: modem-exporter
+spec:
+  selector:
+    app.kubernetes.io/name: modem-exporter
+  ports:
+    - name: metrics
+      port: 9877
+      targetPort: metrics
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: modem-exporter
+  namespace: manager
+spec:
+  namespaceSelector:
+    matchNames: [service]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: modem-exporter
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 20s
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: modem
+  namespace: manager
+spec:
+  groups:
+    - name: modem
+      rules:
+        - alert: ModemDown
+          expr: modem_up == 0 or absent(modem_up)
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Modem web UI cannot be scraped (modem down, credentials rejected, or exporter down)"
+        - alert: ModemPonNotOperational
+          expr: modem_pon_state != 5
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Modem PON state is O{{ $value }}, not O5 (operation): no uplink to the OLT"
+        - alert: ModemOpticalRxLoss
+          expr: modem_optical_rx_ok == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Modem reports loss of optical signal (check the fibre and connector)"
+        - alert: ModemOpticalRxPowerLow
+          expr: modem_optical_rx_power_dbm < -26
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Modem optical Rx power is {{ $value }} dBm (XGS-PON N1 sensitivity is -28 dBm)"
+        - alert: ModemOpticalRxPowerHigh
+          expr: modem_optical_rx_power_dbm > -9
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Modem optical Rx power is {{ $value }} dBm (XGS-PON N1 overload is -8 dBm)"
+        - alert: ModemFecUncorrected
+          expr: increase(modem_pon_fec_codewords_uncorrected_total[10m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Modem saw {{ $value | humanize }} uncorrectable FEC codewords in 10m (data loss on the PON)"
+        - alert: ModemPonErrors
+          expr: |
+            increase(modem_pon_gtc_fs_hec_uncorrected_errors_total[10m])
+            + increase(modem_pon_gtc_psbd_hec_uncorrected_errors_total[10m])
+            + increase(modem_pon_gtc_lost_words_total[10m])
+            + increase(modem_pon_gtc_ploam_mic_errors_total[10m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Modem is logging uncorrected GTC/PLOAM errors on the PON"
+        - alert: ModemGemKeyErrors
+          expr: increase(modem_gem_key_errors_total[10m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "GEM port {{ $labels.gem_id }} has encryption key errors"
+        - alert: ModemTransceiverHot
+          expr: modem_temperature_celsius{sensor="transceiver"} > 75
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Modem optical transceiver is at {{ $value }} C"
+        - alert: ModemCpuHot
+          expr: modem_temperature_celsius{sensor=~"cpu.*"} > 95
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Modem {{ $labels.sensor }} is at {{ $value }} C"
+        - alert: ModemEthernetLinkDegraded
+          expr: modem_ethernet_link_speed_mbps < 10000
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Modem Ethernet link negotiated {{ $value }} Mbps instead of 10000"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: modem-dashboard
+  namespace: manager
+  labels:
+    grafana_dashboard: "1"
+data:
+  modem.json: |
+    {
+      "uid": "modem-pon",
+      "title": "Modem (XGS-PON)",
+      "tags": [
+        "network",
+        "modem"
+      ],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "templating": {
+        "list": []
+      },
+      "annotations": {
+        "list": []
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Scrape",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 3,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_up",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DOWN",
+                      "color": "red"
+                    },
+                    "1": {
+                      "text": "UP",
+                      "color": "green"
+                    }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "PON state",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 3,
+            "y": 0,
+            "w": 4,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_pon_state",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "5": {
+                      "text": "O5 Operation",
+                      "color": "green"
+                    }
+                  }
+                },
+                {
+                  "type": "range",
+                  "options": {
+                    "from": 0,
+                    "to": 4.5,
+                    "result": {
+                      "text": "Not operational",
+                      "color": "red"
+                    }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Rx power",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 7,
+            "y": 0,
+            "w": 4,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_optical_rx_power_dbm",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "dBm",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": -26
+                  },
+                  {
+                    "color": "green",
+                    "value": -24
+                  },
+                  {
+                    "color": "yellow",
+                    "value": -9
+                  },
+                  {
+                    "color": "red",
+                    "value": -8
+                  }
+                ]
+              },
+              "decimals": 2
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Tx power",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 11,
+            "y": 0,
+            "w": 3,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_optical_tx_power_dbm",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "dBm",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 2
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "Transceiver temp",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 14,
+            "y": 0,
+            "w": 4,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_temperature_celsius{sensor=\"transceiver\"}",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "celsius",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 65
+                  },
+                  {
+                    "color": "red",
+                    "value": 75
+                  }
+                ]
+              },
+              "decimals": 1
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 6,
+          "type": "stat",
+          "title": "CPU temp (max)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 18,
+            "y": 0,
+            "w": 3,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "max(modem_temperature_celsius{sensor=~\"cpu.*\"})",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "celsius",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 85
+                  },
+                  {
+                    "color": "red",
+                    "value": 95
+                  }
+                ]
+              },
+              "decimals": 1
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 7,
+          "type": "stat",
+          "title": "Ethernet link",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 21,
+            "y": 0,
+            "w": 3,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_ethernet_link_speed_mbps",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Mbits",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 10000
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 8,
+          "type": "row",
+          "title": "Optics",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 4,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Optical power",
+          "description": "XGS-PON N1 receiver sensitivity is -28 dBm and overload -8 dBm; keep Rx between them with margin.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 5,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_optical_rx_power_dbm",
+              "legendFormat": "Rx",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_optical_tx_power_dbm",
+              "legendFormat": "Tx",
+              "refId": "B"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "dBm",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Temperature",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 5,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_temperature_celsius",
+              "legendFormat": "{{sensor}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "celsius",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "Laser bias current",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 13,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_optical_tx_bias_amperes",
+              "legendFormat": "bias",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "amp",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Transceiver supply voltage",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 13,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_transceiver_voltage_volts",
+              "legendFormat": "supply",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "volt",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 13,
+          "type": "row",
+          "title": "PON link quality",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 21,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "FEC codewords corrected / uncorrected (per second)",
+          "description": "Corrected codewords are normal on a marginal fibre; uncorrected ones are lost data.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 22,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "rate(modem_pon_fec_codewords_corrected_total[$__rate_interval])",
+              "legendFormat": "corrected",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "rate(modem_pon_fec_codewords_uncorrected_total[$__rate_interval])",
+              "legendFormat": "uncorrected",
+              "refId": "B"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "cps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 15,
+          "type": "timeseries",
+          "title": "BIP errors and FEC errored seconds (increase)",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 22,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(modem_pon_bip_errors_total[$__rate_interval])",
+              "legendFormat": "BIP errors",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(modem_pon_fec_errored_seconds_total[$__rate_interval])",
+              "legendFormat": "FEC errored seconds",
+              "refId": "B"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "GTC / XGTC errors (increase)",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 30,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase({__name__=~\"modem_pon_gtc_.*_errors_total|modem_pon_gtc_lost_words_total\"}[$__rate_interval])",
+              "legendFormat": "{{__name__}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "GEM key errors (increase)",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 30,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(modem_gem_key_errors_total[$__rate_interval])",
+              "legendFormat": "gem {{gem_id}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 18,
+          "type": "timeseries",
+          "title": "PON state",
+          "description": "5 = O5 operation. Drops indicate the ONU lost sync or re-ranged.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 38,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_pon_state",
+              "legendFormat": "state",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 19,
+          "type": "timeseries",
+          "title": "FEC corrected ratio",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 38,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "rate(modem_pon_fec_codewords_corrected_total[$__rate_interval]) / rate(modem_pon_fec_codewords_total[$__rate_interval])",
+              "legendFormat": "corrected / total",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 20,
+          "type": "row",
+          "title": "Traffic (per GEM port)",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 46,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "Downstream throughput",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 47,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "rate(modem_gem_downstream_bytes_total[$__rate_interval]) * 8",
+              "legendFormat": "gem {{gem_id}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 22,
+          "type": "timeseries",
+          "title": "Upstream throughput",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 47,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "rate(modem_gem_upstream_bytes_total[$__rate_interval]) * 8",
+              "legendFormat": "gem {{gem_id}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 23,
+          "type": "timeseries",
+          "title": "Downstream packets",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 55,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "rate(modem_gem_downstream_packets_total[$__rate_interval])",
+              "legendFormat": "gem {{gem_id}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "pps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 24,
+          "type": "timeseries",
+          "title": "Upstream packets",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 55,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "rate(modem_gem_upstream_packets_total[$__rate_interval])",
+              "legendFormat": "gem {{gem_id}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "pps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 25,
+          "type": "timeseries",
+          "title": "Scrape duration",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 63,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "modem_scrape_duration_seconds",
+              "legendFormat": "duration",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "spanNulls": false
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        }
+      ]
+    }
+---
+# Switch (Sirivision SR-S25G3412FPB, switch.internal.lilith-aster.me): interface
+# counters via SNMP v2c (read-only community, snmp-exporter) and PoE / CPU / memory
+# via a small exporter that logs into the web UI. Credentials for the web UI live in
+# the `switch-credentials` Secret (secrets/switch.env).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: switch-snmp-exporter
+  namespace: service
+data:
+  snmp.yml: |
+    auths:
+      public_v2:
+        community: public
+        version: 2
+    modules:
+      switch:
+        retries: 1
+        timeout: 5s
+        max_repetitions: 25
+        walk:
+          - 1.3.6.1.2.1.1.3
+          - 1.3.6.1.2.1.10.7.2.1.10
+          - 1.3.6.1.2.1.10.7.2.1.11
+          - 1.3.6.1.2.1.10.7.2.1.13
+          - 1.3.6.1.2.1.10.7.2.1.16
+          - 1.3.6.1.2.1.10.7.2.1.18
+          - 1.3.6.1.2.1.10.7.2.1.19
+          - 1.3.6.1.2.1.10.7.2.1.2
+          - 1.3.6.1.2.1.10.7.2.1.3
+          - 1.3.6.1.2.1.10.7.2.1.8
+          - 1.3.6.1.2.1.10.7.2.1.9
+          - 1.3.6.1.2.1.17.2.15.1.3
+          - 1.3.6.1.2.1.17.2.3
+          - 1.3.6.1.2.1.17.2.4
+          - 1.3.6.1.2.1.17.7.1.1.4
+          - 1.3.6.1.2.1.17.7.1.2.1.1.2
+          - 1.3.6.1.2.1.2.2.1.13
+          - 1.3.6.1.2.1.2.2.1.14
+          - 1.3.6.1.2.1.2.2.1.19
+          - 1.3.6.1.2.1.2.2.1.20
+          - 1.3.6.1.2.1.2.2.1.7
+          - 1.3.6.1.2.1.2.2.1.8
+          - 1.3.6.1.2.1.2.2.1.9
+          - 1.3.6.1.2.1.31.1.1.1.1
+          - 1.3.6.1.2.1.31.1.1.1.10
+          - 1.3.6.1.2.1.31.1.1.1.11
+          - 1.3.6.1.2.1.31.1.1.1.12
+          - 1.3.6.1.2.1.31.1.1.1.13
+          - 1.3.6.1.2.1.31.1.1.1.18
+          - 1.3.6.1.2.1.31.1.1.1.6
+          - 1.3.6.1.2.1.31.1.1.1.7
+          - 1.3.6.1.2.1.31.1.1.1.8
+          - 1.3.6.1.2.1.31.1.1.1.9
+        metrics:
+          - name: switch_if_admin_status
+            oid: 1.3.6.1.2.1.2.2.1.7
+            type: gauge
+            help: "Administrative state: 1 up, 2 down, 3 testing."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_oper_status
+            oid: 1.3.6.1.2.1.2.2.1.8
+            type: gauge
+            help: "Operational state: 1 up, 2 down, 7 lowerLayerDown."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_last_change_ticks
+            oid: 1.3.6.1.2.1.2.2.1.9
+            type: gauge
+            help: "sysUpTime (1/100 s) when the interface last changed state."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_in_discards_total
+            oid: 1.3.6.1.2.1.2.2.1.13
+            type: counter
+            help: "Inbound packets discarded."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_in_errors_total
+            oid: 1.3.6.1.2.1.2.2.1.14
+            type: counter
+            help: "Inbound packets with errors."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_out_discards_total
+            oid: 1.3.6.1.2.1.2.2.1.19
+            type: counter
+            help: "Outbound packets discarded."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_out_errors_total
+            oid: 1.3.6.1.2.1.2.2.1.20
+            type: counter
+            help: "Outbound packets that could not be sent."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_in_octets_total
+            oid: 1.3.6.1.2.1.31.1.1.1.6
+            type: counter
+            help: "Inbound octets."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_in_unicast_packets_total
+            oid: 1.3.6.1.2.1.31.1.1.1.7
+            type: counter
+            help: "Inbound unicast packets."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_in_multicast_packets_total
+            oid: 1.3.6.1.2.1.31.1.1.1.8
+            type: counter
+            help: "Inbound multicast packets."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_in_broadcast_packets_total
+            oid: 1.3.6.1.2.1.31.1.1.1.9
+            type: counter
+            help: "Inbound broadcast packets."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_out_octets_total
+            oid: 1.3.6.1.2.1.31.1.1.1.10
+            type: counter
+            help: "Outbound octets."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_out_unicast_packets_total
+            oid: 1.3.6.1.2.1.31.1.1.1.11
+            type: counter
+            help: "Outbound unicast packets."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_out_multicast_packets_total
+            oid: 1.3.6.1.2.1.31.1.1.1.12
+            type: counter
+            help: "Outbound multicast packets."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_if_out_broadcast_packets_total
+            oid: 1.3.6.1.2.1.31.1.1.1.13
+            type: counter
+            help: "Outbound broadcast packets."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_dot3_alignment_errors_total
+            oid: 1.3.6.1.2.1.10.7.2.1.2
+            type: counter
+            help: "Frames with alignment errors."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_dot3_fcs_errors_total
+            oid: 1.3.6.1.2.1.10.7.2.1.3
+            type: counter
+            help: "Frames with FCS (CRC) errors."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_dot3_late_collisions_total
+            oid: 1.3.6.1.2.1.10.7.2.1.8
+            type: counter
+            help: "Late collisions."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_dot3_excessive_collisions_total
+            oid: 1.3.6.1.2.1.10.7.2.1.9
+            type: counter
+            help: "Frames dropped after excessive collisions."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_dot3_internal_mac_tx_errors_total
+            oid: 1.3.6.1.2.1.10.7.2.1.10
+            type: counter
+            help: "Frames not sent due to internal MAC transmit errors."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_dot3_carrier_sense_errors_total
+            oid: 1.3.6.1.2.1.10.7.2.1.11
+            type: counter
+            help: "Carrier sense errors."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_dot3_frame_too_long_total
+            oid: 1.3.6.1.2.1.10.7.2.1.13
+            type: counter
+            help: "Frames longer than the maximum size."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_dot3_internal_mac_rx_errors_total
+            oid: 1.3.6.1.2.1.10.7.2.1.16
+            type: counter
+            help: "Frames not received due to internal MAC receive errors."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_dot3_symbol_errors_total
+            oid: 1.3.6.1.2.1.10.7.2.1.18
+            type: counter
+            help: "Symbol errors on the line."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_dot3_duplex
+            oid: 1.3.6.1.2.1.10.7.2.1.19
+            type: gauge
+            help: "Duplex: 1 unknown, 2 half, 3 full."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_stp_port_state
+            oid: 1.3.6.1.2.1.17.2.15.1.3
+            type: gauge
+            help: "STP port state: 1 disabled, 2 blocking, 3 listening, 4 learning, 5 forwarding, 6 broken."
+            indexes:
+              - labelname: ifIndex
+                type: gauge
+            lookups:
+              - labels: [ifIndex]
+                labelname: ifName
+                oid: 1.3.6.1.2.1.31.1.1.1.1
+                type: DisplayString
+              - labels: [ifIndex]
+                labelname: ifAlias
+                oid: 1.3.6.1.2.1.31.1.1.1.18
+                type: DisplayString
+          - name: switch_uptime_ticks
+            oid: 1.3.6.1.2.1.1.3
+            type: gauge
+            help: "sysUpTime in 1/100 s."
+          - name: switch_stp_topology_changes_total
+            oid: 1.3.6.1.2.1.17.2.4
+            type: counter
+            help: "Spanning tree topology changes."
+          - name: switch_stp_time_since_topology_change_ticks
+            oid: 1.3.6.1.2.1.17.2.3
+            type: gauge
+            help: "Time since the last topology change in 1/100 s."
+          - name: switch_vlans
+            oid: 1.3.6.1.2.1.17.7.1.1.4
+            type: gauge
+            help: "Number of active VLANs."
+          - name: switch_fdb_dynamic_entries
+            oid: 1.3.6.1.2.1.17.7.1.2.1.1.2
+            type: gauge
+            help: "Learned MAC addresses per FDB."
+            indexes:
+              - labelname: fdb_id
+                type: gauge
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: switch-snmp
+  namespace: service
+  labels:
+    app.kubernetes.io/name: switch-snmp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: switch-snmp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: switch-snmp
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: snmp-exporter
+          image: prom/snmp-exporter:v0.31.0
+          args:
+            - --config.file=/config/snmp.yml
+          ports:
+            - name: metrics
+              containerPort: 9116
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: switch-snmp-exporter
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: switch-snmp
+  namespace: service
+  labels:
+    app.kubernetes.io/name: switch-snmp
+spec:
+  selector:
+    app.kubernetes.io/name: switch-snmp
+  ports:
+    - name: metrics
+      port: 9116
+      targetPort: metrics
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: switch-exporter
+  namespace: service
+data:
+  exporter.py: |
+    #!/usr/bin/env python3
+    """Prometheus exporter for the PoE and CPU/memory data of a Sirivision switch web UI.
+
+    Interface counters come from SNMP (snmp-exporter); the web UI is the only source of
+    PoE and CPU/memory. The UI authenticates by source IP, so one login serves every
+    later request until the switch reports `logout`.
+    """
+    import json
+    import os
+    import ssl
+    import threading
+    import time
+    import urllib.parse
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    BASE = os.environ["SWITCH_URL"].rstrip("/")
+    USER = os.environ["SWITCH_USERNAME"]
+    PASSWORD = os.environ["SWITCH_PASSWORD"]
+    CACHE_TTL = float(os.environ.get("CACHE_TTL", "10"))
+
+    # The switch serves a self-signed certificate and speaks only TLS 1.2 with static-RSA
+    # AES-GCM suites, which a current OpenSSL does not offer by default.
+    CTX = ssl.create_default_context()
+    CTX.check_hostname = False
+    CTX.verify_mode = ssl.CERT_NONE
+    CTX.maximum_version = ssl.TLSVersion.TLSv1_2
+    CTX.set_ciphers("AES256-GCM-SHA384:AES128-GCM-SHA256:@SECLEVEL=0")
+
+    lock = threading.Lock()
+    cache = (0.0, "")
+
+
+    def request(url, data=None):
+        body = urllib.parse.urlencode(data).encode() if data is not None else None
+        with urllib.request.urlopen(urllib.request.Request(url, body), timeout=10, context=CTX) as r:
+            return r.read().decode("utf-8", "replace")
+
+
+    def login():
+        resp = request(
+            f"{BASE}/cgi/set.cgi?cmd=home_loginAuth&dummy={int(time.time() * 1000)}",
+            {"username": USER, "password": PASSWORD},
+        )
+        if json.loads(resp).get("status") != "ok":
+            raise RuntimeError("login rejected")
+
+
+    def get(cmd):
+        for attempt in (0, 1):
+            data = json.loads(request(f"{BASE}/cgi/get.cgi?cmd={cmd}"))
+            if not data.get("logout"):
+                return data["data"]
+            if attempt:
+                break
+            login()
+        raise RuntimeError("session rejected for " + cmd)
+
+
+    def esc(v):
+        return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+    class Out:
+        def __init__(self):
+            self.lines = []
+            self.seen = set()
+
+        def add(self, name, value, help_, **labels):
+            if name not in self.seen:
+                self.seen.add(name)
+                self.lines.append(f"# HELP {name} {help_}")
+                self.lines.append(f"# TYPE {name} gauge")
+            lbl = ",".join(f'{k}="{esc(v)}"' for k, v in labels.items())
+            self.lines.append(f"{name}{{{lbl}}} {value}" if lbl else f"{name} {value}")
+
+
+    def collect():
+        o = Out()
+        t0 = time.time()
+        try:
+            cpumem = get("sys_cpumem")
+            poe = get("poe_port")
+            panel = get("panel_info")
+        except Exception as e:  # noqa: BLE001 - any failure means the web UI is not scrapable
+            print("scrape failed:", repr(e), flush=True)
+            o.add("switch_web_up", 0, "Whether the switch web UI was scraped successfully.")
+            o.add("switch_web_scrape_duration_seconds", round(time.time() - t0, 3), "Scrape duration.")
+            return "\n".join(o.lines) + "\n"
+
+        o.add("switch_web_up", 1, "Whether the switch web UI was scraped successfully.")
+        o.add("switch_cpu_usage_ratio", cpumem["cpu"] / 100, "CPU utilisation.")
+        o.add("switch_memory_usage_ratio", cpumem["mem"] / 100, "Memory utilisation.")
+
+        o.add("switch_poe_budget_watts", poe["total_p"], "Total PoE power budget.")
+        o.add("switch_poe_consumption_watts", float(poe["power_consum"]), "Total PoE power drawn.")
+        o.add("switch_poe_voltage_volts", float(poe["total_v"]), "PoE supply voltage.")
+        for port in poe["ports"]:
+            # PoE ports 0-7 are the first eight interfaces, so ifIndex is idx + 1.
+            labels = {"ifIndex": port["idx"] + 1, "ifAlias": port["descp"]}
+            o.add("switch_poe_port_power_watts", float(port["power"]), "PoE power drawn by the port.", **labels)
+            o.add("switch_poe_port_current_amperes", float(port["current"]), "PoE current drawn by the port.", **labels)
+            o.add("switch_poe_port_voltage_volts", float(port["voltage"]), "PoE voltage on the port.", **labels)
+            o.add("switch_poe_port_delivering", int(port["operation"] == "On"), "1 when the port is delivering PoE.", **labels)
+            o.add("switch_poe_port_class", int(port["class"]), "Powered device class.", **labels)
+        # The SNMP speed columns are unusable on this firmware; the panel view has the real value.
+        for i, port in enumerate(panel["ports"]):
+            up = bool(port.get("linkup"))
+            o.add("switch_port_link_up", int(up), "1 when the port has link.", ifIndex=i + 1)
+            o.add("switch_port_speed_mbps", int(port.get("speed", 0)) if up else 0,
+                  "Negotiated speed in Mbit/s, 0 without link.", ifIndex=i + 1)
+        o.add("switch_web_scrape_duration_seconds", round(time.time() - t0, 3), "Scrape duration.")
+        return "\n".join(o.lines) + "\n"
+
+
+    def metrics():
+        global cache
+        with lock:
+            ts, body = cache
+            if time.time() - ts > CACHE_TTL:
+                body = collect()
+                cache = (time.time(), body)
+            return body
+
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path == "/metrics":
+                body, code = metrics().encode(), 200
+            elif self.path == "/healthz":
+                body, code = b"ok\n", 200
+            else:
+                body, code = b"not found\n", 404
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+
+    if __name__ == "__main__":
+        ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "9878"))), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: switch-exporter
+  namespace: service
+  labels:
+    app.kubernetes.io/name: switch-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: switch-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: switch-exporter
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exporter
+          image: python:3.14.10-alpine3.24
+          command: ["python3", "-I", "/app/exporter.py"]
+          env:
+            - name: SWITCH_URL
+              value: https://192.168.0.199
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          envFrom:
+            - secretRef:
+                name: switch-credentials
+          ports:
+            - name: metrics
+              containerPort: 9878
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 96Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: script
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: script
+          configMap:
+            name: switch-exporter
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: switch-exporter
+  namespace: service
+  labels:
+    app.kubernetes.io/name: switch-exporter
+spec:
+  selector:
+    app.kubernetes.io/name: switch-exporter
+  ports:
+    - name: metrics
+      port: 9878
+      targetPort: metrics
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: switch-snmp
+  namespace: manager
+spec:
+  namespaceSelector:
+    matchNames: [service]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: switch-snmp
+  endpoints:
+    - port: metrics
+      path: /snmp
+      interval: 30s
+      scrapeTimeout: 20s
+      params:
+        module: [switch]
+        auth: [public_v2]
+        target: [192.168.0.199]
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: switch-exporter
+  namespace: manager
+spec:
+  namespaceSelector:
+    matchNames: [service]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: switch-exporter
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 20s
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: switch
+  namespace: manager
+spec:
+  groups:
+    - name: switch
+      rules:
+        - alert: SwitchSnmpDown
+          expr: up{job="switch-snmp"} == 0 or absent(up{job="switch-snmp"})
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Switch cannot be polled over SNMP (switch down, SNMP disabled, or exporter down)"
+        - alert: SwitchWebDown
+          expr: switch_web_up == 0 or absent(switch_web_up)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Switch web UI cannot be scraped (PoE and CPU metrics are missing)"
+        - alert: SwitchRebooted
+          expr: switch_uptime_ticks < 30000
+          labels:
+            severity: warning
+          annotations:
+            summary: "Switch rebooted within the last 5 minutes"
+        # Only ports with a description are in use; SE4 ("mirrored") and the PC port
+        # are expected to go down, so they are left out.
+        - alert: SwitchUplinkDown
+          expr: |
+            switch_if_oper_status{ifAlias=~"routers?|modem|AP|NAS"} != 1
+            and on(ifIndex) switch_if_admin_status == 1
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Switch port {{ $labels.ifName }} ({{ $labels.ifAlias }}) is down"
+        # Expected speeds: modem and NAS ports run 10G, routers and AP 2.5G.
+        - alert: SwitchUplinkSpeedLow
+          expr: |
+            (switch_port_speed_mbps > 0 < 10000)
+              * on(ifIndex) group_left(ifName, ifAlias) (switch_if_admin_status{ifAlias=~"modem|NAS"} == 1)
+            or
+            (switch_port_speed_mbps > 0 < 2500)
+              * on(ifIndex) group_left(ifName, ifAlias) (switch_if_admin_status{ifAlias=~"routers?|AP"} == 1)
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Switch port {{ $labels.ifName }} ({{ $labels.ifAlias }}) negotiated only {{ $value }} Mbit/s"
+        - alert: SwitchLinkFlapping
+          expr: changes(switch_if_oper_status{ifName!~"LAG.*"}[30m]) > 4
+          labels:
+            severity: warning
+          annotations:
+            summary: "Switch port {{ $labels.ifName }} ({{ $labels.ifAlias }}) changed state {{ $value }} times in 30m"
+        - alert: SwitchPortErrors
+          expr: |
+            increase(switch_if_in_errors_total{ifName!~"LAG.*"}[15m]) > 20
+            or increase(switch_if_out_errors_total{ifName!~"LAG.*"}[15m]) > 20
+            or increase(switch_dot3_fcs_errors_total{ifName!~"LAG.*"}[15m]) > 20
+            or increase(switch_dot3_symbol_errors_total{ifName!~"LAG.*"}[15m]) > 20
+          labels:
+            severity: warning
+          annotations:
+            summary: "Switch port {{ $labels.ifName }} ({{ $labels.ifAlias }}) is logging errors (bad cable or SFP?)"
+        - alert: SwitchPortHalfDuplex
+          expr: switch_dot3_duplex{ifName!~"LAG.*"} == 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Switch port {{ $labels.ifName }} ({{ $labels.ifAlias }}) negotiated half duplex"
+        - alert: SwitchBroadcastStorm
+          expr: |
+            sum by (ifName, ifAlias) (
+              rate(switch_if_in_broadcast_packets_total{ifName!~"LAG.*"}[5m])
+              + rate(switch_if_in_multicast_packets_total{ifName!~"LAG.*"}[5m])
+            ) > 20000
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Switch port {{ $labels.ifName }} receives {{ $value | humanize }} broadcast/multicast packets/s (loop?)"
+        - alert: SwitchTopologyChange
+          expr: increase(switch_stp_topology_changes_total[10m]) > 0
+          labels:
+            severity: info
+          annotations:
+            summary: "Switch STP topology changed"
+        - alert: SwitchCpuHigh
+          expr: switch_cpu_usage_ratio > 0.8
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Switch CPU is at {{ $value | humanizePercentage }}"
+        - alert: SwitchMemoryHigh
+          expr: switch_memory_usage_ratio > 0.9
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Switch memory is at {{ $value | humanizePercentage }}"
+        - alert: SwitchPoeBudgetHigh
+          expr: switch_poe_consumption_watts / switch_poe_budget_watts > 0.8
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Switch PoE load is at {{ $value | humanizePercentage }} of the budget"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: switch-dashboard
+  namespace: manager
+  labels:
+    grafana_dashboard: "1"
+data:
+  switch.json: |
+    {
+      "uid": "switch",
+      "title": "Switch (SR-S25G3412FPB)",
+      "tags": [
+        "network",
+        "switch"
+      ],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "templating": {
+        "list": []
+      },
+      "annotations": {
+        "list": []
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "SNMP",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 3,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "up{job=\"switch-snmp\"}",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DOWN",
+                      "color": "red"
+                    },
+                    "1": {
+                      "text": "UP",
+                      "color": "green"
+                    }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Web UI",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 3,
+            "y": 0,
+            "w": 3,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_web_up",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DOWN",
+                      "color": "red"
+                    },
+                    "1": {
+                      "text": "UP",
+                      "color": "green"
+                    }
+                  }
+                }
+              ],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Uptime",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 6,
+            "y": 0,
+            "w": 3,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_uptime_ticks / 100",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "CPU",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 9,
+            "y": 0,
+            "w": 3,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_cpu_usage_ratio",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.7
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.9
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "Memory",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 0,
+            "w": 3,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_memory_usage_ratio",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.8
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.9
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 6,
+          "type": "stat",
+          "title": "Links up",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 15,
+            "y": 0,
+            "w": 3,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "count(switch_if_oper_status{ifName!~\"LAG.*\"} == 1)",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 7,
+          "type": "stat",
+          "title": "PoE load",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 18,
+            "y": 0,
+            "w": 3,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_poe_consumption_watts",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "watt",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "decimals": 1
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 8,
+          "type": "stat",
+          "title": "Topology changes (6h)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 21,
+            "y": 0,
+            "w": 3,
+            "h": 4
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(switch_stp_topology_changes_total[6h])",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 1
+                  }
+                ]
+              },
+              "decimals": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 9,
+          "type": "row",
+          "title": "Ports",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 4,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "id": 10,
+          "type": "state-timeline",
+          "title": "Link state",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 5,
+            "w": 24,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_if_oper_status{ifName!~\"LAG.*\"}",
+              "legendFormat": "{{ifName}} {{ifAlias}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "showValue": "never",
+            "mergeValues": true,
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "1": {
+                      "text": "up",
+                      "color": "green"
+                    },
+                    "2": {
+                      "text": "down",
+                      "color": "red"
+                    },
+                    "7": {
+                      "text": "lowerLayerDown",
+                      "color": "orange"
+                    }
+                  }
+                }
+              ],
+              "custom": {
+                "fillOpacity": 80
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "Link speed",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 13,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_port_speed_mbps * on(ifIndex) group_left(ifName, ifAlias) switch_if_admin_status{ifName!~\"LAG.*\"}",
+              "legendFormat": "{{ifName}} {{ifAlias}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Mbits",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Learned MAC addresses",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 13,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_fdb_dynamic_entries",
+              "legendFormat": "fdb {{fdb_id}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 13,
+          "type": "row",
+          "title": "Traffic",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 21,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "Inbound throughput",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 22,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "rate(switch_if_in_octets_total{ifName!~\"LAG.*\"}[$__rate_interval]) * 8",
+              "legendFormat": "{{ifName}} {{ifAlias}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 15,
+          "type": "timeseries",
+          "title": "Outbound throughput",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 22,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "rate(switch_if_out_octets_total{ifName!~\"LAG.*\"}[$__rate_interval]) * 8",
+              "legendFormat": "{{ifName}} {{ifAlias}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "Inbound broadcast + multicast packets",
+          "description": "A sustained spike here is the signature of a broadcast storm or a loop.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 30,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "rate(switch_if_in_broadcast_packets_total{ifName!~\"LAG.*\"}[$__rate_interval]) + rate(switch_if_in_multicast_packets_total{ifName!~\"LAG.*\"}[$__rate_interval])",
+              "legendFormat": "{{ifName}} {{ifAlias}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "pps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "Inbound unicast packets",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 30,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "rate(switch_if_in_unicast_packets_total{ifName!~\"LAG.*\"}[$__rate_interval])",
+              "legendFormat": "{{ifName}} {{ifAlias}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "pps",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 18,
+          "type": "row",
+          "title": "Errors",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 38,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "id": 19,
+          "type": "timeseries",
+          "title": "Receive errors (increase)",
+          "description": "Non-zero values usually mean a bad cable, connector or SFP.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 39,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(switch_if_in_errors_total{ifName!~\"LAG.*\"}[$__rate_interval])",
+              "legendFormat": "in errors {{ifName}} {{ifAlias}}",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(switch_dot3_fcs_errors_total{ifName!~\"LAG.*\"}[$__rate_interval])",
+              "legendFormat": "FCS {{ifName}} {{ifAlias}}",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(switch_dot3_alignment_errors_total{ifName!~\"LAG.*\"}[$__rate_interval])",
+              "legendFormat": "alignment {{ifName}} {{ifAlias}}",
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(switch_dot3_symbol_errors_total{ifName!~\"LAG.*\"}[$__rate_interval])",
+              "legendFormat": "symbol {{ifName}} {{ifAlias}}",
+              "refId": "D"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 20,
+          "type": "timeseries",
+          "title": "Transmit errors and collisions (increase)",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 39,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(switch_if_out_errors_total{ifName!~\"LAG.*\"}[$__rate_interval])",
+              "legendFormat": "out errors {{ifName}} {{ifAlias}}",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(switch_dot3_late_collisions_total{ifName!~\"LAG.*\"}[$__rate_interval])",
+              "legendFormat": "late collisions {{ifName}} {{ifAlias}}",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(switch_dot3_excessive_collisions_total{ifName!~\"LAG.*\"}[$__rate_interval])",
+              "legendFormat": "excessive collisions {{ifName}} {{ifAlias}}",
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(switch_dot3_internal_mac_tx_errors_total{ifName!~\"LAG.*\"}[$__rate_interval])",
+              "legendFormat": "MAC tx {{ifName}} {{ifAlias}}",
+              "refId": "D"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "Discards (increase)",
+          "description": "Outbound discards under load mean a port is congested (for example 10G into a 2.5G link).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 47,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(switch_if_in_discards_total{ifName!~\"LAG.*\"}[$__rate_interval])",
+              "legendFormat": "in {{ifName}} {{ifAlias}}",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(switch_if_out_discards_total{ifName!~\"LAG.*\"}[$__rate_interval])",
+              "legendFormat": "out {{ifName}} {{ifAlias}}",
+              "refId": "B"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 22,
+          "type": "timeseries",
+          "title": "Topology changes and VLANs",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 47,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "increase(switch_stp_topology_changes_total[$__rate_interval])",
+              "legendFormat": "STP topology changes",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_vlans",
+              "legendFormat": "VLAN count",
+              "refId": "B"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 23,
+          "type": "row",
+          "title": "PoE and system",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 55,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "id": 24,
+          "type": "timeseries",
+          "title": "PoE power per port",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 56,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_poe_port_power_watts > 0",
+              "legendFormat": "port {{ifIndex}} {{ifAlias}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "watt",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 40,
+                "stacking": {
+                  "mode": "normal"
+                }
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 25,
+          "type": "timeseries",
+          "title": "PoE total vs budget",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 56,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_poe_consumption_watts",
+              "legendFormat": "drawn",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_poe_budget_watts",
+              "legendFormat": "budget",
+              "refId": "B"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "watt",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 26,
+          "type": "timeseries",
+          "title": "CPU and memory",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 64,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_cpu_usage_ratio",
+              "legendFormat": "CPU",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_memory_usage_ratio",
+              "legendFormat": "memory",
+              "refId": "B"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 27,
+          "type": "timeseries",
+          "title": "Scrape duration",
+          "description": "",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 64,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "switch_web_scrape_duration_seconds",
+              "legendFormat": "web UI",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "snmp_scrape_duration_seconds{job=\"switch-snmp\"}",
+              "legendFormat": "SNMP",
+              "refId": "B"
+            }
+          ],
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "lineWidth": 1,
+                "fillOpacity": 10
+              },
+              "min": 0
+            },
+            "overrides": []
+          }
+        }
+      ]
+    }

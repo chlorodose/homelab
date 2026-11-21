@@ -10,6 +10,7 @@ resources:
   # - mastodon.yaml
   - openlist.yaml
   - dnsexporter.yaml
+  - network-monitoring.yaml
   - sub2api.yaml
   - www
 components:
