@@ -46,7 +46,7 @@ metadata:
 spec:
   url: oci://ghcr.io/wiremind/wiremind-helm-charts/plugin-barman-cloud-crds
   ref:
-    semver: "^0.11"
+    semver: "^0.16"
 ---
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
