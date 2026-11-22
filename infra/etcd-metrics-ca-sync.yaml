@@ -63,7 +63,7 @@ spec:
               type: RuntimeDefault
           initContainers:
             - name: extract-ca
-              image: docker.io/mikefarah/yq:4.54.1
+              image: docker.io/mikefarah/yq:4.54.3
               command: [/bin/sh, -ec]
               args:
                 - |
@@ -93,7 +93,7 @@ spec:
                   mountPath: /work
           containers:
             - name: sync-ca
-              image: registry.k8s.io/kubectl:v1.35.0
+              image: registry.k8s.io/kubectl:v1.37.2
               command: [kubectl]
               args:
                 - --cache-dir=/work/cache

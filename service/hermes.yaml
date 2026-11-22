@@ -261,7 +261,7 @@ metadata:
   name: hermes
 spec:
   chart: hermes-agent
-  version: 1.23.0
+  version: 1.27.0
   sourceRef:
     kind: HelmRepository
     name: hermes
@@ -278,7 +278,7 @@ spec:
   values:
     fullnameOverride: hermes
     image:
-      tag: v0.22.5
+      tag: v0.23.3
     env: {}
     serviceAccount:
       create: true

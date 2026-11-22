@@ -247,7 +247,7 @@ spec:
               type: RuntimeDefault
           initContainers:
             - name: collect
-              image: busybox:1.36
+              image: busybox:1.38
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
@@ -306,7 +306,7 @@ spec:
                   mountPath: /archive
           containers:
             - name: upload
-              image: rclone/rclone:1.75.2
+              image: rclone/rclone:1.76.0
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

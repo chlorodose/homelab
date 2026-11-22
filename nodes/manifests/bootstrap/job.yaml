@@ -15,7 +15,7 @@ spec:
         node-role.kubernetes.io/control-plane: ""
       containers:
         - name: bootstrap-script
-          image: alpine/k8s:1.32.13
+          image: alpine/k8s:1.37.2
           command:
             - "/bin/sh"
             - "-c"
