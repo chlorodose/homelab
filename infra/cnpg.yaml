@@ -31,7 +31,7 @@ metadata:
 spec:
   url: oci://ghcr.io/cloudnative-pg/charts/plugin-barman-cloud
   ref:
-    semver: "^0.6"
+    semver: "^0.9"
 ---
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
