@@ -55,6 +55,8 @@ spec:
         # Talos control-plane metrics bind to loopback. There is one control-plane
         # node in this cluster; collect locally without changing its listeners.
         hostNetwork: true
+        # Both Pods need the same host ports on controller0.
+        updateStrategy: Recreate
         dnsPolicy: ClusterFirstWithHostNet
         nodeSelector:
           kubernetes.io/hostname: controller0
