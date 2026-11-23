@@ -86,7 +86,7 @@ spec:
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"
             - name: SEAWEED_TIER_APPLY
-              value: "false"
+              value: "true"
             - name: SEAWEED_ADMIN_SIGNING_KEY
               valueFrom:
                 secretKeyRef:

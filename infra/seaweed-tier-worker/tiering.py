@@ -75,16 +75,9 @@ def weed_shell(*commands):
 def volume_limit():
     result = subprocess.run(
         ["/runtime/weed", "shell", f"-master={MASTER}", f"-filer={FILER}"],
-        input="volume.list -v=0\n", capture_output=True, text=True, timeout=15, check=True,
+        input="volume.list\n", capture_output=True, text=True, timeout=15, check=True,
     )
     match = re.search(r"volumeSizeLimit:(\d+) MB", result.stdout)
-    if not match:
-        # volume.list suppresses the topology header at some verbosity levels.
-        result = subprocess.run(
-            ["/runtime/weed", "shell", f"-master={MASTER}", f"-filer={FILER}"],
-            input="volume.list\n", capture_output=True, text=True, timeout=15, check=True,
-        )
-        match = re.search(r"volumeSizeLimit:(\d+) MB", result.stdout)
     if not match:
         raise RuntimeError("could not determine logical volume size limit")
     return int(match[1]) * 1024**2
@@ -198,7 +191,17 @@ def execute(progress, cancelled):
                 if state["emergency"]:
                     raise RuntimeError(f"SSD {used:.1f}%; emergency remains active with no candidate")
                 return f"Migrated {migrated} volumes; SSD {used:.1f}%"
-            state["pending"] = migration_record(candidates[0])
+            candidate = candidates[0]
+            record = migration_record(candidate)
+            current_disk, current_volumes = status(SSD)
+            current = current_volumes.get(candidate["Id"])
+            if (not current or current["ModifiedAtSecond"] != candidate["ModifiedAtSecond"]
+                    or current["Size"] != candidate["Size"]
+                    or (not state["emergency"] and
+                        (current_disk["percent_used"] <= 40 or current_disk["percent_used"] > 85))
+                    or (state["emergency"] and current_disk["percent_used"] < 60)):
+                continue
+            state["pending"] = record
             persist(state)
         progress(f"SSD {used:.1f}%; moving volume {state['pending']['id']}")
         resume_move(state["pending"])
