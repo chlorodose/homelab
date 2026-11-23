@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: database
+resources:
+  - worker.yaml
+configMapGenerator:
+  - name: seaweed-ssd-tier-worker
+    files:
+      - worker.py
+      - tiering.py
+      - plugin.proto
+      - volume.proto
+      - requirements.txt

@@ -19,6 +19,7 @@ resources:
   - etcd-metrics-ca-sync.yaml
   - local-csi.yaml
   - seaweedfs.yaml
+  - seaweed-tier-worker
 patches:
   - target:
       group: helm.toolkit.fluxcd.io

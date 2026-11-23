@@ -1,0 +1,16 @@
+// Wire-compatible subset of SeaweedFS 4.54 weed/pb/volume_server.proto.
+syntax = "proto3";
+package volume_server_pb;
+
+service VolumeServer {
+  rpc VolumeConfigure(VolumeConfigureRequest) returns (VolumeConfigureResponse);
+}
+
+message VolumeConfigureRequest {
+  uint32 volume_id = 1;
+  string replication = 2;
+}
+
+message VolumeConfigureResponse {
+  string error = 1;
+}

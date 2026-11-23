@@ -1,0 +1,109 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: seaweed-ssd-tier-worker-state
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: proxmox-nvram
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seaweed-ssd-tier-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: seaweed-ssd-tier-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: seaweed-ssd-tier-worker
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 180
+      securityContext:
+        fsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: weed
+          image: chrislusf/seaweedfs:4.54
+          command: ["/bin/sh", "-ec", "cp \"$(command -v weed)\" /runtime/weed"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: runtime
+              mountPath: /runtime
+        - name: python-dependencies
+          image: python:3.13-slim
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              python -m pip install --disable-pip-version-check --no-cache-dir --no-deps --target /runtime -r /source/requirements.txt
+              python -m grpc_tools.protoc -I/source --python_out=/runtime --grpc_python_out=/runtime /source/plugin.proto /source/volume.proto
+          env:
+            - name: PYTHONPATH
+              value: /runtime
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: runtime
+              mountPath: /runtime
+            - name: source
+              mountPath: /source
+              readOnly: true
+      containers:
+        - name: worker
+          image: python:3.13-slim
+          command: ["python", "-u", "/source/worker.py"]
+          env:
+            - name: PYTHONPATH
+              value: /runtime
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: SEAWEED_TIER_APPLY
+              value: "false"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 48Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: runtime
+              mountPath: /runtime
+              readOnly: true
+            - name: source
+              mountPath: /source
+              readOnly: true
+            - name: state
+              mountPath: /state
+      volumes:
+        - name: runtime
+          emptyDir: {}
+        - name: source
+          configMap:
+            name: seaweed-ssd-tier-worker
+        - name: state
+          persistentVolumeClaim:
+            claimName: seaweed-ssd-tier-worker-state
