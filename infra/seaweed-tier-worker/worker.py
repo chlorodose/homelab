@@ -1,11 +1,15 @@
 """Python implementation of SeaweedFS 4.54's plugin worker stream."""
 
 import asyncio
+import base64
 import contextlib
+import hmac
+import json
 import logging
 import os
 import signal
 import threading
+import time
 import uuid
 
 import grpc
@@ -17,6 +21,18 @@ import tiering
 JOB_TYPE = "ssd_tiering"
 ADMIN = os.environ.get("SEAWEED_ADMIN_GRPC", "seaweed-admin.database:33646")
 LOG = logging.getLogger(JOB_TYPE)
+
+
+def admin_metadata():
+    def encode(data):
+        return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+    header = encode(b'{"alg":"HS256","typ":"JWT"}')
+    payload = encode(json.dumps({"exp": int(time.time()) + 60}).encode())
+    signing_input = header + b"." + payload
+    key = os.environ["SEAWEED_ADMIN_SIGNING_KEY"].encode()
+    signature = encode(hmac.digest(key, signing_input, "sha256"))
+    return (("authorization", "Bearer " + (signing_input + b"." + signature).decode()),)
 
 
 def descriptor():
@@ -41,7 +57,7 @@ def detect():
     emergency = state["emergency"] or used > 85
     if not emergency and not state["pending"]:
         limit = tiering.volume_limit()
-        candidates = tiering.select(volumes, False, tiering.time.time(), limit)
+        candidates = tiering.select(volumes, False, time.time(), limit)
         if not candidates:
             return None, f"SSD {used:.1f}% used; no regular candidates"
     return pb.JobProposal(
@@ -198,7 +214,7 @@ class Worker:
             )],
         ))
         async with grpc.aio.insecure_channel(ADMIN) as channel:
-            stream = rpc.PluginControlServiceStub(channel).WorkerStream()
+            stream = rpc.PluginControlServiceStub(channel).WorkerStream(metadata=admin_metadata())
             async def send_messages():
                 while True:
                     await stream.write(await self.outgoing.get())

@@ -1,4 +1,13 @@
 apiVersion: v1
+kind: Secret
+metadata:
+  name: seaweed-ssd-tier-worker-signing
+  annotations:
+    secret-generator.v1.mittwald.de/autogenerate: signingKey
+    secret-generator.v1.mittwald.de/encoding: hex
+type: Opaque
+---
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: seaweed-ssd-tier-worker-state
@@ -78,6 +87,11 @@ spec:
               value: "1"
             - name: SEAWEED_TIER_APPLY
               value: "false"
+            - name: SEAWEED_ADMIN_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: seaweed-ssd-tier-worker-signing
+                  key: signingKey
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

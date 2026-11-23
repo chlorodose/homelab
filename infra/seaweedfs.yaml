@@ -46,6 +46,12 @@ spec:
   admin:
     credentialsSecret:
       name: seaweedfs-admin-token
+    env:
+      - name: WEED_JWT_FILER_SIGNING_KEY
+        valueFrom:
+          secretKeyRef:
+            name: seaweed-ssd-tier-worker-signing
+            key: signingKey
     extraArgs:
       - "-ip"
       - "0.0.0.0"
