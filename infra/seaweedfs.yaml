@@ -117,6 +117,16 @@ spec:
       requests:
         storage: 1860Gi
       storageClassName: hddr-volumes
+    ssd:
+      dataCenter: default
+      rack: default
+      replicas: 1
+      metricsPort: 9325
+      storageClassName: proxmox-nvram
+      requests:
+        storage: 256Gi
+      extraArgs:
+        - "-disk=ssd"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
