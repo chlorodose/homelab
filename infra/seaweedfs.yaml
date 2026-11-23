@@ -50,6 +50,10 @@ spec:
       - "-ip"
       - "0.0.0.0"
   filer:
+    extraArgs:
+      - "-disk=ssd"
+      # A single SSD volume server can satisfy only single-copy placement.
+      - "-defaultReplicaPlacement=000"
     config: |
       [postgres2]
       enabled  = true
