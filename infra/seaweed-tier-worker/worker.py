@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import contextlib
+from dataclasses import asdict
 import hmac
 import json
 import logging
@@ -21,6 +22,56 @@ import tiering
 JOB_TYPE = "ssd_tiering"
 ADMIN = os.environ.get("SEAWEED_ADMIN_GRPC", "seaweed-admin.database:33646")
 LOG = logging.getLogger(JOB_TYPE)
+DEFAULTS = asdict(tiering.Policy())
+POLICY_FIELDS = (
+    ("regular_usage_percent", "Regular SSD threshold (%)",
+     "Run regular tiering only when SSD usage exceeds this value.", 0, 99),
+    ("quiet_days", "Minimum quiet period (days)",
+     "Regular tiering requires the last modification to be older than this many days.", 0, None),
+    ("volume_fill_percent", "Minimum volume fill (%)",
+     "Regular tiering requires the volume to exceed this percentage of its size limit.", 0, 100),
+    ("emergency_usage_percent", "Emergency SSD threshold (%)",
+     "Above this SSD usage, ignore volume age and fill. Must exceed the regular threshold and the emergency stop target.", 1, 99),
+    ("emergency_stop_percent", "Emergency stop target (%)",
+     "Continue emergency tiering until SSD usage drops below this value.", 1, 98),
+)
+
+
+def policy_form():
+    fields = []
+    for name, label, description, minimum, maximum in POLICY_FIELDS:
+        field = pb.ConfigField(
+            name=name, label=label, description=description, required=True,
+            field_type=pb.CONFIG_FIELD_TYPE_INT64, widget=pb.CONFIG_WIDGET_NUMBER,
+            min_value=pb.ConfigValue(int64_value=minimum),
+        )
+        if maximum is not None:
+            field.max_value.int64_value = maximum
+        fields.append(field)
+    return pb.ConfigForm(
+        form_id="ssd-tiering-policy", title="SSD tiering policy",
+        sections=[pb.ConfigSection(section_id="thresholds", title="Migration thresholds", fields=fields)],
+        default_values={name: pb.ConfigValue(int64_value=value) for name, value in DEFAULTS.items()},
+    )
+
+
+def policy_from_config(config):
+    settings = dict(DEFAULTS)
+    for name, label, _, minimum, maximum in POLICY_FIELDS:
+        if name not in config:
+            continue
+        setting = config[name]
+        if setting.WhichOneof("kind") != "int64_value":
+            raise ValueError(f"{label} must be an integer")
+        value = setting.int64_value
+        if value < minimum or (maximum is not None and value > maximum):
+            raise ValueError(f"{label} is out of range")
+        settings[name] = value
+    policy = tiering.Policy(**settings)
+    if policy.emergency_usage_percent <= max(policy.regular_usage_percent,
+                                             policy.emergency_stop_percent):
+        raise ValueError("Emergency threshold must exceed the regular threshold and stop target")
+    return policy
 
 
 def admin_metadata():
@@ -38,7 +89,8 @@ def admin_metadata():
 def descriptor():
     return pb.JobTypeDescriptor(
         job_type=JOB_TYPE, display_name="SSD tiering",
-        description="Move SSD volumes to HDD using disk watermarks", descriptor_version=1,
+        description="Move SSD volumes to HDD using disk watermarks", descriptor_version=2,
+        admin_config_form=policy_form(),
         admin_runtime_defaults=pb.AdminRuntimeDefaults(
             enabled=True, detection_interval_minutes=5, detection_timeout_seconds=45,
             max_jobs_per_detection=1, global_execution_concurrency=1,
@@ -48,16 +100,16 @@ def descriptor():
     )
 
 
-def detect():
+def detect(policy):
     disk, volumes = tiering.status(tiering.SSD)
     used = disk["percent_used"]
     state = tiering.load_state()
-    if not state["pending"] and not state["emergency"] and used <= 40:
-        return None, f"SSD {used:.1f}% used; below regular migration threshold"
-    emergency = state["emergency"] or used > 85
+    if not state["pending"] and not state["emergency"] and used <= policy.regular_usage_percent:
+        return None, f"SSD {used:.1f}% used; regular threshold is {policy.regular_usage_percent}%"
+    emergency = state["emergency"] or used > policy.emergency_usage_percent
     if not emergency and not state["pending"]:
         limit = tiering.volume_limit()
-        candidates = tiering.select(volumes, False, time.time(), limit)
+        candidates = tiering.select(volumes, False, time.time(), limit, policy)
         if not candidates:
             return None, f"SSD {used:.1f}% used; no regular candidates"
     return pb.JobProposal(
@@ -102,10 +154,10 @@ class Worker:
             await asyncio.sleep(self.interval)
             self.heartbeat()
 
-    async def do_detection(self, request_id):
+    async def do_detection(self, request_id, config):
         result = pb.DetectionComplete(request_id=request_id, job_type=JOB_TYPE)
         try:
-            proposal, skipped = await asyncio.to_thread(detect)
+            proposal, skipped = await asyncio.to_thread(detect, policy_from_config(config))
             if self.cancelled.is_set():
                 raise RuntimeError("Detection cancelled")
             if proposal:
@@ -122,7 +174,7 @@ class Worker:
         finally:
             self.send("detection_complete", result)
 
-    async def do_execution(self, request_id, job_id):
+    async def do_execution(self, request_id, job_id, config):
         result = pb.JobCompleted(request_id=request_id, job_id=job_id, job_type=JOB_TYPE)
         loop = asyncio.get_running_loop()
 
@@ -134,7 +186,9 @@ class Worker:
             ))
 
         try:
-            summary = await asyncio.to_thread(tiering.execute, progress, self.cancelled)
+            summary = await asyncio.to_thread(
+                tiering.execute, progress, self.cancelled, policy_from_config(config),
+            )
             LOG.info("%s", summary)
             result.success = True
             result.result.summary = summary
@@ -144,12 +198,12 @@ class Worker:
         finally:
             self.send("job_completed", result)
 
-    async def run_work(self, kind, work_id, request_id):
+    async def run_work(self, kind, work_id, request_id, config):
         try:
             if kind == pb.WORK_KIND_DETECTION:
-                await self.do_detection(request_id)
+                await self.do_detection(request_id, config)
             else:
-                await self.do_execution(request_id, work_id)
+                await self.do_execution(request_id, work_id, config)
         finally:
             self.work = None
             self.heartbeat()
@@ -178,7 +232,8 @@ class Worker:
                 request = message.run_detection_request
                 kind, work_id, job_type = pb.WORK_KIND_DETECTION, request_id, request.job_type
             else:
-                job = message.execute_job_request.job
+                request = message.execute_job_request
+                job = request.job
                 kind, work_id, job_type = pb.WORK_KIND_EXECUTION, job.job_id, job.job_type
             if self.work or job_type != JOB_TYPE or not work_id:
                 self.ack(request_id, False, "Busy or unsupported work")
@@ -189,7 +244,9 @@ class Worker:
             )
             self.ack(request_id, True)
             self.heartbeat()
-            self.active = asyncio.create_task(self.run_work(kind, work_id, request_id))
+            self.active = asyncio.create_task(
+                self.run_work(kind, work_id, request_id, request.admin_config_values),
+            )
         elif body == "cancel_request":
             accepted = bool(self.work and self.work.work_id == message.cancel_request.target_id)
             if accepted:
@@ -206,7 +263,7 @@ class Worker:
         self.outgoing = asyncio.Queue()
         self.send("hello", pb.WorkerHello(
             worker_id=self.worker_id, worker_instance_id=self.instance,
-            worker_version="1", protocol_version="plugin.v1",
+            worker_version="2", protocol_version="plugin.v1",
             capabilities=[pb.JobTypeCapability(
                 job_type=JOB_TYPE, can_detect=True, can_execute=True,
                 max_detection_concurrency=1, max_execution_concurrency=1,

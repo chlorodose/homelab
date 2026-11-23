@@ -1,5 +1,6 @@
 """SSD volume policy and one-volume migration for the homelab topology."""
 
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -21,7 +22,15 @@ FILER = "seaweed-filer.database:8888"
 STATE = Path("/state/tiering.json")
 APPLY = os.environ.get("SEAWEED_TIER_APPLY") == "true"
 GIB = 1024**3
-QUIET_SECONDS = 7 * 24 * 3600
+
+
+@dataclass(frozen=True)
+class Policy:
+    regular_usage_percent: int = 40
+    quiet_days: int = 7
+    volume_fill_percent: int = 85
+    emergency_usage_percent: int = 85
+    emergency_stop_percent: int = 60
 
 
 def read_json(url):
@@ -83,30 +92,30 @@ def volume_limit():
     return int(match[1]) * 1024**2
 
 
-def select(volumes, emergency, now, limit):
+def select(volumes, emergency, now, limit, policy):
     return sorted(
         (v for v in volumes.values()
          if v["DiskType"] == "ssd" and not v["RemoteStorageName"]
          and v["ReplicaPlacement"] == {} and 0 < v["ModifiedAtSecond"] <= now
-         and (emergency or (now - v["ModifiedAtSecond"] > QUIET_SECONDS
-                            and 100 * v["Size"] > 85 * limit))),
+         and (emergency or (now - v["ModifiedAtSecond"] > policy.quiet_days * 86400
+                            and 100 * v["Size"] > policy.volume_fill_percent * limit))),
         key=lambda volume: (volume["ModifiedAtSecond"], volume["Id"]),
     )
 
 
-def inspect(state, limit):
+def inspect(state, limit, policy):
     disk, volumes = status(SSD)
     used = disk["percent_used"]
-    if used > 85 and not state["emergency"]:
+    if used > policy.emergency_usage_percent and not state["emergency"]:
         state["emergency"] = True
         persist(state)
-    if state["emergency"] and used < 60 and not state["pending"]:
+    if state["emergency"] and used < policy.emergency_stop_percent and not state["pending"]:
         state["emergency"] = False
         persist(state)
         return used, [], True
-    if used <= 40 and not state["emergency"]:
+    if used <= policy.regular_usage_percent and not state["emergency"]:
         return used, [], False
-    return used, select(volumes, state["emergency"], time.time(), limit), False
+    return used, select(volumes, state["emergency"], time.time(), limit, policy), False
 
 
 def configure(host, volume_id):
@@ -174,12 +183,12 @@ def migration_record(volume):
     return {"id": volume["Id"], "targets": targets}
 
 
-def execute(progress, cancelled):
+def execute(progress, cancelled, policy):
     state = load_state()
     limit = volume_limit()
     migrated = 0
     while not cancelled.is_set():
-        used, candidates, cleared = inspect(state, limit)
+        used, candidates, cleared = inspect(state, limit, policy)
         if not APPLY:
             ids = [v["Id"] for v in candidates]
             return (f"Dry run: SSD {used:.1f}%; emergency={state['emergency']}; "
@@ -195,11 +204,13 @@ def execute(progress, cancelled):
             record = migration_record(candidate)
             current_disk, current_volumes = status(SSD)
             current = current_volumes.get(candidate["Id"])
+            current_used = current_disk["percent_used"]
             if (not current or current["ModifiedAtSecond"] != candidate["ModifiedAtSecond"]
                     or current["Size"] != candidate["Size"]
                     or (not state["emergency"] and
-                        (current_disk["percent_used"] <= 40 or current_disk["percent_used"] > 85))
-                    or (state["emergency"] and current_disk["percent_used"] < 60)):
+                        (current_used <= policy.regular_usage_percent
+                         or current_used > policy.emergency_usage_percent))
+                    or (state["emergency"] and current_used < policy.emergency_stop_percent)):
                 continue
             state["pending"] = record
             persist(state)
