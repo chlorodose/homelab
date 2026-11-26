@@ -3,7 +3,6 @@ kind: Kustomization
 resources:
   - vaultwarden.yaml
   - kanidm.yaml
-  - kanidm-lilith.yaml
   - synapse.yaml
   - mas.yaml
   - hermes.yaml
